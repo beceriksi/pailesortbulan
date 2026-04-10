@@ -28,32 +28,34 @@ def get_data(endpoint, params={}):
 
 def find_htf_resistance(symbol):
     """
-    4 Saatlik 200 mumu tarayarak Fractal High (Zirve) bölgelerini bulur.
-    Fiyatın geçmişte takıldığı 'ana kaleleri' tespit eder.
+    4 Saatlik grafiği tarar. Üstteki dirençleri bulur, 0 hatasını engeller.
     """
     candles = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "4H", "limit": "200"})
-    if not candles: return []
+    if not candles: return ["Veri Yok"]
     
     df = pd.DataFrame(candles, columns=['ts','o','h','l','c','v','vc','vq','conf'])
     highs = df['h'].astype(float).tolist()
+    current_price = float(df['c'].iloc[0])
     
     potential_res = []
-    # Fractal High: Bir mum sağındaki ve solundaki 2 mumdan yüksekse zirvedir
+    # Fractal High Analizi (5'li mum yapısı)
     for i in range(2, len(highs) - 2):
         if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
            highs[i] > highs[i+1] and highs[i] > highs[i+2]:
             potential_res.append(highs[i])
     
-    if not potential_res: return []
-    
-    # Mevcut fiyata en yakın üstteki 2 ana direnci döndür
-    current_price = float(df['c'].iloc[0])
-    upper_res = [r for r in potential_res if r > current_price]
-    return sorted(list(set(upper_res)))[:2]
+    # Fiyatın üzerindeki dirençleri seç
+    upper_res = sorted(list(set([r for r in potential_res if r > current_price])))
+
+    if not upper_res:
+        max_ever = max(highs)
+        return [max_ever] if max_ever > current_price else ["ZİRVE (ATH) ÜSTÜ"]
+
+    return upper_res[:2]
 
 def get_buy_sell_ratio(symbol, df_1h=None):
     """
-    Rubik API'den veri çeker, yoksa canlı mumdan sentetik oran üretir.
+    Rubik API verisi yoksa mum yapısından sentetik oran üretir.
     """
     res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
     buy_vol, sell_vol = 0, 0
@@ -84,9 +86,9 @@ def check_15m_micro_flow(symbol):
     
     notes = []
     if closes[-1] > opens[-1] and vols[-1] > vols[-2]:
-        notes.append("⚠️ *TEHLİKE:* 15m barda alıcılar çok güçlü giriyor!")
+        notes.append("⚠️ *TEHLİKE:* 15m'de alıcılar hacimli giriş yaptı!")
     if vols[-1] < vols[-2] < vols[-3]:
-        notes.append("📉 *15m Hacim Kuruması:* Satıcı iştahı azalıyor.")
+        notes.append("📉 *15m Hacim Kuruması:* Satış baskısı azalıyor.")
     return "\n".join(notes)
 
 def calculate_rsi(series, period=14):
@@ -94,6 +96,11 @@ def calculate_rsi(series, period=14):
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     return 100 - (100 / (1 + gain / loss))
+
+def format_price(price):
+    """Sıfırların kaybolmaması için fiyatı formatlar."""
+    if isinstance(price, str): return price
+    return f"{price:.8f}".rstrip('0').rstrip('.')
 
 def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
@@ -120,20 +127,21 @@ def scan():
             
             if rsi > RSI_LIMIT:
                 alert_status = ""
-                if ratio > 1.35:
-                    alert_status = "🚫 *SAKIN EKLEME YAPMA!* (Alıcılar %35+ Baskın)\n"
-                elif ratio < 0.75:
-                    alert_status = "📉 *SATICILAR BASKIN:* Dönüş sinyali güçlü.\n"
+                if ratio > 1.30:
+                    alert_status = "🚫 *SAKIN EKLEME YAPMA!* (Alıcılar %30+ Baskın)\n"
+                elif ratio < 0.70:
+                    alert_status = "📉 *SATICILAR BASKIN:* Trend dönüşü beklenebilir.\n"
 
                 header = f"🔥 *MİKRO DURUM:*\n{micro_alert}\n\n" if micro_alert else ""
-                res_text = " | ".join([f"{round(r, 4)}" for r in htf_res]) if htf_res else "Bulunamadı"
+                # Dirençleri formatlı yazdır
+                res_text = " | ".join([format_price(r) for r in htf_res])
 
                 msg = (f"{alert_status}{header}🚨 *SİNYAL: {symbol}*\n\n"
                        f"📊 RSI: {round(rsi, 1)} | 📈 24s: %{round(change, 1)}\n"
                        f"🏔️ *4H ANA DİRENÇLER:* {res_text}\n"
                        f"🛒 *Alıcı/Satıcı Oranı:* {ratio}\n"
                        f"💰 Alış Hacmi: {round(b_vol/1000, 1)}K | Satış: {round(s_vol/1000, 1)}K\n\n"
-                       f"🧲 *LİKİDİTE HEDEFLERİ (1H):*\n{round(float(df_1h['l'].min()), 5)}\n")
+                       f"🧲 *LİKİDİTE (1H EN DÜŞÜK):* {format_price(float(df_1h['l'].min()))}\n")
                 signals.append(msg)
                 
     if signals:
