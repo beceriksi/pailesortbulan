@@ -15,8 +15,6 @@ def send_telegram(msg):
     if TOKEN and CHAT_ID and msg:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         try:
-            # Mesaj çok uzunsa Telegram sınırı olan 4096 karaktere takılmaması için parçalanabilir
-            # Ancak genel taramalarda tek mesaj yeterli olacaktır.
             requests.post(url, json={
                 "chat_id": CHAT_ID, 
                 "text": msg, 
@@ -45,55 +43,39 @@ def find_custom_sr(df, pivot_len=2):
             p_lows.append(lows[i])
     return p_highs, p_lows
 
-def get_htf_analysis(symbol):
-    candles = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "4H", "limit": "100"})
-    if not candles: return None, None, False
-    df_htf = pd.DataFrame(candles, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1]
-    p_highs, p_lows = find_custom_sr(df_htf)
-    curr_c = float(df_htf['c'].iloc[-1])
-    
-    res_4h = min([h for h in p_highs if h > curr_c]) if any(h > curr_c for h in p_highs) else (p_highs[-1] if p_highs else 0)
-    sup_4h = max([l for l in p_lows if l < curr_c]) if any(l < curr_c for l in p_lows) else (p_lows[-1] if p_lows else 0)
-    
-    is_htf_break = False
-    if p_highs and curr_c > p_highs[-1]:
-        is_htf_break = True
-        
-    return res_4h, sup_4h, is_htf_break
-
 def get_smart_volume(symbol, df_1h):
     res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
     buy_v = 0; sell_v = 0
-    
     if res and len(res) > 0 and float(res[0][1]) > 0:
         buy_v = float(res[0][1]); sell_v = float(res[0][2])
     else:
         last = df_1h.iloc[-1]
         c, o, h, l, v = float(last['c']), float(last['o']), float(last['h']), float(last['l']), float(last['v'])
-        body = abs(c - o)
-        total_range = (h - l) if (h - l) > 0 else 0.0001
-        if c > o:
-            buy_v = v * (0.5 + (body / total_range) * 0.5)
-            sell_v = v - buy_v
-        else:
-            sell_v = v * (0.5 + (body / total_range) * 0.5)
-            buy_v = v - sell_v
+        body = abs(c - o); total_range = (h - l) if (h - l) > 0 else 0.0001
+        if c > o: buy_v = v * (0.5 + (body / total_range) * 0.5); sell_v = v - buy_v
+        else: sell_v = v * (0.5 + (body / total_range) * 0.5); buy_v = v - sell_v
             
     ratio = round(buy_v / sell_v, 2) if sell_v > 0 else 1.0
     return buy_v, sell_v, ratio
 
 def check_volume_divergence(df):
+    """Hacim uyumsuzluğunu bulur ve yönü tayin eder."""
     prices = df['c'].astype(float).iloc[-5:].values
     volumes = df['v'].astype(float).iloc[-5:].values
-    price_rising = prices[-1] > prices[0]
-    vol_falling = volumes[-1] < volumes[-3]
-    if price_rising and vol_falling:
-        return "⚠️ *HACİM UYUMSUZLUĞU!*"
+    
+    # Ayı Uyumsuzluğu (Fiyat ↑, Hacim ↓) -> SHORT DESTEKLER
+    if prices[-1] > prices[0] and volumes[-1] < volumes[-2]:
+        return "⚠️ *HACİM UYUMSUZLUĞU:* 🐻 (Short Destekli)"
+    
+    # Boğa Uyumsuzluğu (Fiyat ↓, Hacim ↑) -> LONG DESTEKLER (Bot genelde RSI>70 baktığı için nadir çıkar)
+    if prices[-1] < prices[0] and volumes[-1] > volumes[-2]:
+        return "⚠️ *HACİM UYUMSUZLUĞU:* 🐂 (Alım Baskısı)"
+        
     return ""
 
 def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
-    all_signals = [] # Sinyalleri burada biriktireceğiz
+    all_signals = []
     
     for t in tickers:
         symbol = t['instId']
@@ -112,32 +94,31 @@ def scan():
             rsi_val = 100 - (100 / (1 + gain / loss)).iloc[-1]
             
             if rsi_val > RSI_LIMIT:
-                res_4h, sup_4h, htf_break = get_htf_analysis(symbol)
+                candles_4h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "4H", "limit": "100"})
+                df_htf = pd.DataFrame(candles_4h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1]
+                p_highs_4h, _ = find_custom_sr(df_htf)
+                curr_c = float(df_htf['c'].iloc[-1])
+                res_4h = min([h for h in p_highs_4h if h > curr_c]) if any(h > curr_c for h in p_highs_4h) else (p_highs_4h[-1] if p_highs_4h else 0)
+
                 buy_v, sell_v, ratio = get_smart_volume(symbol, df)
                 vol_div = check_volume_divergence(df)
-                p_highs, _ = find_custom_sr(df)
-                last_res_1h = p_highs[-1] if p_highs else 0
 
-                # Durum Belirleme
-                if htf_break: status = "🔥 *DİRENÇ KIRILDI!*"
-                elif ratio < 0.85: status = "📉 *SATICILAR GELDİ*"
-                elif ratio > 1.35: status = "🚫 *SAKIN EKLEME YAPMA*"
-                else: status = "🛡️ *DİRENÇ ALTI*"
+                # Yön Belirleme (Robotik Yorum)
+                if ratio < 0.85: direction = "📉 *SHORT FIRSATI*"
+                elif ratio > 1.35: direction = "🚫 *ZİRVEDE ALICI (TEHLİKE)*"
+                else: direction = "🛡️ *DİRENÇ GÖZLEMİ*"
 
                 div_msg = f"\n{vol_div}" if vol_div else ""
 
-                # Tekil Coin Bilgisi
-                signal_msg = (f"{status} | *{symbol}*\n"
+                signal_msg = (f"{direction} | *{symbol}*\n"
                               f"📊 RSI: `{round(rsi_val, 1)}` | 📈 24s: `%{round(change, 1)}` \n"
-                              f"⚖️ Oran: `{ratio}` | 🏛️ 4H: `{res_4h}`{div_msg}\n")
+                              f"⚖️ Oran: `{ratio}` | 🏛️ 4H Direnç: `{res_4h}`{div_msg}\n")
                 
                 all_signals.append(signal_msg)
 
-    # Tüm sinyaller toplandıktan sonra tek seferde gönder
     if all_signals:
-        header = "🔍 *PİYASA TARAMA SONUÇLARI*\n━━━━━━━━━━━━━━━\n"
-        footer = f"\n🕒 Toplam {len(all_signals)} coin bulundu."
-        final_report = header + "\n".join(all_signals) + footer
+        header = "🔍 *BURSA TARAMA RAPORU* 🔍\n━━━━━━━━━━━━━━━\n"
+        final_report = header + "\n".join(all_signals)
         send_telegram(final_report)
 
 if __name__ == "__main__":
