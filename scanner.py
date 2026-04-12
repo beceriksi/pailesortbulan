@@ -54,23 +54,14 @@ def get_smart_volume(symbol, df_1h):
         body = abs(c - o); total_range = (h - l) if (h - l) > 0 else 0.0001
         if c > o: buy_v = v * (0.5 + (body / total_range) * 0.5); sell_v = v - buy_v
         else: sell_v = v * (0.5 + (body / total_range) * 0.5); buy_v = v - sell_v
-            
     ratio = round(buy_v / sell_v, 2) if sell_v > 0 else 1.0
     return buy_v, sell_v, ratio
 
 def check_volume_divergence(df):
-    """Hacim uyumsuzluğunu bulur ve yönü tayin eder."""
     prices = df['c'].astype(float).iloc[-5:].values
     volumes = df['v'].astype(float).iloc[-5:].values
-    
-    # Ayı Uyumsuzluğu (Fiyat ↑, Hacim ↓) -> SHORT DESTEKLER
     if prices[-1] > prices[0] and volumes[-1] < volumes[-2]:
         return "⚠️ *HACİM UYUMSUZLUĞU:* 🐻 (Short Destekli)"
-    
-    # Boğa Uyumsuzluğu (Fiyat ↓, Hacim ↑) -> LONG DESTEKLER (Bot genelde RSI>70 baktığı için nadir çıkar)
-    if prices[-1] < prices[0] and volumes[-1] > volumes[-2]:
-        return "⚠️ *HACİM UYUMSUZLUĞU:* 🐂 (Alım Baskısı)"
-        
     return ""
 
 def scan():
@@ -86,40 +77,53 @@ def scan():
         if change > CHANGE_24H_LIMIT:
             candles_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "100"})
             if not candles_1h: continue
-            df = pd.DataFrame(candles_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
-            df['c'] = df['c'].astype(float)
+            df_1h = pd.DataFrame(candles_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
+            df_1h['c'] = df_1h['c'].astype(float)
             
             # RSI
-            delta = df['c'].diff(); gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            delta = df_1h['c'].diff(); gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rsi_val = 100 - (100 / (1 + gain / loss)).iloc[-1]
             
             if rsi_val > RSI_LIMIT:
+                # 4H Analiz
                 candles_4h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "4H", "limit": "100"})
-                df_htf = pd.DataFrame(candles_4h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1]
-                p_highs_4h, _ = find_custom_sr(df_htf)
-                curr_c = float(df_htf['c'].iloc[-1])
-                res_4h = min([h for h in p_highs_4h if h > curr_c]) if any(h > curr_c for h in p_highs_4h) else (p_highs_4h[-1] if p_highs_4h else 0)
+                df_4h = pd.DataFrame(candles_4h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1]
+                p_highs_4h, p_lows_4h = find_custom_sr(df_4h)
+                res_4h = min([h for h in p_highs_4h if h > last_price]) if any(h > last_price for h in p_highs_4h) else (p_highs_4h[-1] if p_highs_4h else 0)
+                
+                # 1H Analiz
+                p_highs_1h, p_lows_1h = find_custom_sr(df_1h)
+                res_1h = min([h for h in p_highs_1h if h > last_price]) if any(h > last_price for h in p_highs_1h) else (p_highs_1h[-1] if p_highs_1h else 0)
+                sup_1h = max([l for l in p_lows_1h if l < last_price]) if any(l < last_price for l in p_lows_1h) else (p_lows_1h[-1] if p_lows_1h else 0)
 
-                buy_v, sell_v, ratio = get_smart_volume(symbol, df)
-                vol_div = check_volume_divergence(df)
+                buy_v, sell_v, ratio = get_smart_volume(symbol, df_1h)
+                vol_div = check_volume_divergence(df_1h)
 
-                # Yön Belirleme (Robotik Yorum)
-                if ratio < 0.85: direction = "📉 *SHORT FIRSATI*"
-                elif ratio > 1.35: direction = "🚫 *ZİRVEDE ALICI (TEHLİKE)*"
-                else: direction = "🛡️ *DİRENÇ GÖZLEMİ*"
+                # DİRENÇ VE SATIŞ YORUMU
+                status_note = ""
+                if last_price > res_4h and res_4h != 0:
+                    status_note = "🔥 *DİRENÇ ÜSTÜ:* 4H Ana direnç kırıldı, riskli!"
+                elif (res_1h - last_price) / last_price < 0.005: # %0.5 yakınlık
+                    status_note = "🚨 *DİRENÇTE:* Dirençten satış yemeye çalışıyor."
+                elif ratio < 0.85:
+                    status_note = "📉 *SATIŞ BASKISI:* Direnç altı hacimli satışlar var."
+                elif ratio > 1.35:
+                    status_note = "🚫 *SAKIN EKLEME:* Alıcılar hala çok agresif."
+                else:
+                    status_note = "🛡️ *DİRENÇ ALTI:* Kararsız bölge, hacim bekle."
 
                 div_msg = f"\n{vol_div}" if vol_div else ""
 
-                signal_msg = (f"{direction} | *{symbol}*\n"
-                              f"📊 RSI: `{round(rsi_val, 1)}` | 📈 24s: `%{round(change, 1)}` \n"
-                              f"⚖️ Oran: `{ratio}` | 🏛️ 4H Direnç: `{res_4h}`{div_msg}\n")
+                signal_msg = (f"*{symbol}* | RSI: `{round(rsi_val, 1)}` | %{round(change, 1)}\n"
+                              f"{status_note}\n"
+                              f"🛒 Oran: `{ratio}` | 🏛️ 4H: `{res_4h}` | 📍 1H: `{res_1h}`{div_msg}\n"
+                              f"━━━━━━━━━━━━━━━")
                 
                 all_signals.append(signal_msg)
 
     if all_signals:
-        header = "🔍 *BURSA TARAMA RAPORU* 🔍\n━━━━━━━━━━━━━━━\n"
-        final_report = header + "\n".join(all_signals)
-        send_telegram(final_report)
+        header = "🔍 *BURSA PİYASA ANALİZİ* 🔍\n━━━━━━━━━━━━━━━\n"
+        send_telegram(header + "\n".join(all_signals))
 
 if __name__ == "__main__":
     scan()
