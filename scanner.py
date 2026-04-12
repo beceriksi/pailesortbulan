@@ -36,76 +36,75 @@ def find_custom_sr(df, pivot_len=2):
             p_lows.append(lows[i])
     return p_highs, p_lows
 
+def get_htf_analysis(symbol):
+    candles = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "4H", "limit": "100"})
+    if not candles: return None, None, False
+    df_htf = pd.DataFrame(candles, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1]
+    p_highs, p_lows = find_custom_sr(df_htf)
+    curr_c = float(df_htf['c'].iloc[-1])
+    res_4h = min([h for h in p_highs if h > curr_c]) if any(h > curr_c for h in p_highs) else max(df_htf['h'].astype(float))
+    sup_4h = max([l for l in p_lows if l < curr_c]) if any(l < curr_c for l in p_lows) else min(df_htf['l'].astype(float))
+    is_htf_break = curr_c > p_highs[-1] if p_highs else False
+    return res_4h, sup_4h, is_htf_break
+
 def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
-    tickers = sorted(tickers, key=lambda x: float(x['vol24h']), reverse=True)
-    
     for t in tickers:
         symbol = t['instId']
         if "-USDT-" not in symbol: continue
-        
         last_price = float(t['last'])
         change = (last_price / float(t['open24h']) - 1) * 100
         
         if change > CHANGE_24H_LIMIT:
             candles_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "100"})
             if not candles_1h: continue
-            
             df = pd.DataFrame(candles_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
             df['c'] = df['c'].astype(float)
-            df['h'] = df['h'].astype(float)
-
-            # RSI Hesaplama
-            delta = df['c'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            
+            # RSI
+            delta = df['c'].diff(); gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
             
             if rsi > RSI_LIMIT:
-                if last_price >= df['h'].max(): continue 
+                res_4h, sup_4h, htf_break = get_htf_analysis(symbol)
+                if htf_break: continue # 4H Direnç kırıldıysa Short yok
 
                 p_highs, p_lows = find_custom_sr(df)
                 if not p_highs: continue
                 last_res_1h = p_highs[-1]
-
-                # Yeni Direnç Kırılım Filtresi
                 if df['c'].iloc[-1] > last_res_1h: continue 
 
-                # Alıcı/Satıcı Oranı ve Yorum Mantığı
+                # PARA AKIŞI VERİSİ (USDT BAZLI)
                 ratio_res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
-                ratio = 1.0
-                alert_status = "⚠️ *DURUM BELİRSİZ*"
-                durum_notu = "Piyasa akışı takip edilmeli."
+                buy_vol_usdt = 0; sell_vol_usdt = 0; ratio = 1.0
+                alert_status = "🛡️ *DİRENÇ ALTI SEYİR*"; note = "Fiyat direnç altında."
                 
                 if ratio_res:
-                    b_vol, s_vol = float(ratio_res[0][1]), float(ratio_res[0][2])
-                    ratio = round(b_vol / s_vol, 2) if s_vol > 0 else 1.0
+                    buy_vol_usdt = float(ratio_res[0][1]) # USDT cinsinden alım
+                    sell_vol_usdt = float(ratio_res[0][2]) # USDT cinsinden satış
+                    ratio = round(buy_vol_usdt / sell_vol_usdt, 2) if sell_vol_usdt > 0 else 1.0
                     
                     if ratio > 1.35:
-                        alert_status = "🚫 *SAKIN EKLEME YAPMA!*"
-                        durum_notu = "Alıcılar çok baskın, direnci zorlayabilir."
+                        alert_status = "🚫 *SAKIN EKLEME YAPMA!*"; note = "Alıcılar agresif, direnç kırılabilir."
                     elif ratio < 0.85:
-                        alert_status = "📉 *SATICILAR GELDİ / SHORT DESTEKLENİYOR*"
-                        durum_notu = "Direnç altında satış baskısı artıyor, tam short vakti."
-                    else:
-                        alert_status = "🛡️ *DİRENÇ ALTI SEYİR*"
-                        durum_notu = "Fiyat direnç altında oyalanıyor, kırılım gelmedi."
+                        alert_status = "📉 *SATICILAR GELDİ / SHORT VAKTİ*"; note = "Satış hacmi alışı geçti, direnç korunuyor."
 
-                funding_res = get_data("/api/v5/public/funding-rate", {"instId": symbol})
-                funding = funding_res[0]['fundingRate'] if funding_res else "0"
                 tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
 
-                # ŞİMDİ SENİN İSTEDİĞİN O DOLU DOLU MESAJ
+                # MESAJ TASARIMI (USDT Hacimli)
                 msg = (f"{alert_status}\n\n"
                        f"🚨 *SİNYAL: {symbol}*\n"
                        f"━━━━━━━━━━━━━━━\n"
                        f"📊 RSI: `{round(rsi, 1)}` | 📈 24s: `%{round(change, 1)}` \n"
-                       f"🏦 Funding: `{funding}` | 🛒 Oran: `{ratio}`\n\n"
-                       f"📍 *1H DİRENÇ (Pivot 2-2):* `{last_res_1h}`\n"
-                       f"✅ *1H DESTEK (Pivot 2-2):* `{p_lows[-1] if p_lows else 'Yok'}`\n\n"
-                       f"📝 *NOT:* {durum_notu}\n"
+                       f"🛒 *1H PARA AKIŞI (USDT):*\n"
+                       f"🟢 Alış: `${round(buy_vol_usdt/1000, 1)}K` \n"
+                       f"🔴 Satış: `${round(sell_vol_usdt/1000, 1)}K` \n"
+                       f"⚖️ Oran: `{ratio}`\n\n"
+                       f"📍 *1H DİRENÇ:* `{last_res_1h}`\n"
+                       f"🏛️ *4H DİRENÇ:* `{res_4h}`\n\n"
+                       f"📝 *NOT:* {note}\n"
                        f"━━━━━━━━━━━━━━━\n"
-                       f"🔗 [Grafiği TradingView'de Aç]({tv_link})")
+                       f"🔗 [Grafiği Aç]({tv_link})")
                 
                 send_telegram(msg)
 
