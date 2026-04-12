@@ -12,10 +12,17 @@ RSI_LIMIT = 70
 CHANGE_24H_LIMIT = 8
 
 def send_telegram(msg):
-    if TOKEN and CHAT_ID:
+    if TOKEN and CHAT_ID and msg:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         try:
-            requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True})
+            # Mesaj çok uzunsa Telegram sınırı olan 4096 karaktere takılmaması için parçalanabilir
+            # Ancak genel taramalarda tek mesaj yeterli olacaktır.
+            requests.post(url, json={
+                "chat_id": CHAT_ID, 
+                "text": msg, 
+                "parse_mode": "Markdown", 
+                "disable_web_page_preview": True
+            })
         except: pass
 
 def get_data(endpoint, params={}):
@@ -55,15 +62,12 @@ def get_htf_analysis(symbol):
     return res_4h, sup_4h, is_htf_break
 
 def get_smart_volume(symbol, df_1h):
-    """Rubik API boş dönerse mum yapısından sentetik hacim üretir."""
     res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
     buy_v = 0; sell_v = 0
     
     if res and len(res) > 0 and float(res[0][1]) > 0:
-        buy_v = float(res[0][1])
-        sell_v = float(res[0][2])
+        buy_v = float(res[0][1]); sell_v = float(res[0][2])
     else:
-        # API 0 dönerse mum gövdesine göre hacmi paylaştır
         last = df_1h.iloc[-1]
         c, o, h, l, v = float(last['c']), float(last['o']), float(last['h']), float(last['l']), float(last['v'])
         body = abs(c - o)
@@ -79,22 +83,18 @@ def get_smart_volume(symbol, df_1h):
     return buy_v, sell_v, ratio
 
 def check_volume_divergence(df):
-    """Fiyat çıkarken hacim düşüyor mu kontrolü (1H)."""
-    # Son 5 mumdaki trendi incele
     prices = df['c'].astype(float).iloc[-5:].values
     volumes = df['v'].astype(float).iloc[-5:].values
-    
-    # Fiyat yükseliyor mu? (Basit trend)
     price_rising = prices[-1] > prices[0]
-    # Hacim düşüyor mu? (Son 3 mum ortalaması öncekine göre)
     vol_falling = volumes[-1] < volumes[-3]
-    
     if price_rising and vol_falling:
-        return "⚠️ *HACİM UYUMSUZLUĞU:* Fiyat yükseliyor ama hacim zayıflıyor!"
+        return "⚠️ *HACİM UYUMSUZLUĞU!*"
     return ""
 
 def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
+    all_signals = [] # Sinyalleri burada biriktireceğiz
+    
     for t in tickers:
         symbol = t['instId']
         if "-USDT-" not in symbol: continue
@@ -107,57 +107,38 @@ def scan():
             df = pd.DataFrame(candles_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
             df['c'] = df['c'].astype(float)
             
-            # RSI Hesaplama
+            # RSI
             delta = df['c'].diff(); gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
+            rsi_val = 100 - (100 / (1 + gain / loss)).iloc[-1]
             
-            if rsi > RSI_LIMIT:
+            if rsi_val > RSI_LIMIT:
                 res_4h, sup_4h, htf_break = get_htf_analysis(symbol)
                 buy_v, sell_v, ratio = get_smart_volume(symbol, df)
                 vol_div = check_volume_divergence(df)
-                
-                # 1H Pivotlar
                 p_highs, _ = find_custom_sr(df)
                 last_res_1h = p_highs[-1] if p_highs else 0
 
-                # NOT VE BAŞLIK BELİRLEME
-                alert_header = ""
-                note = ""
+                # Durum Belirleme
+                if htf_break: status = "🔥 *DİRENÇ KIRILDI!*"
+                elif ratio < 0.85: status = "📉 *SATICILAR GELDİ*"
+                elif ratio > 1.35: status = "🚫 *SAKIN EKLEME YAPMA*"
+                else: status = "🛡️ *DİRENÇ ALTI*"
+
+                div_msg = f"\n{vol_div}" if vol_div else ""
+
+                # Tekil Coin Bilgisi
+                signal_msg = (f"{status} | *{symbol}*\n"
+                              f"📊 RSI: `{round(rsi_val, 1)}` | 📈 24s: `%{round(change, 1)}` \n"
+                              f"⚖️ Oran: `{ratio}` | 🏛️ 4H: `{res_4h}`{div_msg}\n")
                 
-                if htf_break:
-                    alert_header = "🔥 *DİRENÇ KIRILDI! RİSK ÇOK YÜKSEK*"
-                    note = "4H ana direnci üzerinde kapanış geldi, trend çok güçlü!"
-                elif ratio < 0.85:
-                    alert_header = "📉 *SATICILAR BASKIN / SHORT?*"
-                    note = "Direnç korunuyor, hacimli satışlar başladı."
-                elif ratio > 1.35:
-                    alert_status = "🚫 *SAKIN EKLEME YAPMA!*"
-                    note = "Alıcılar çok agresif, direnç zorlanıyor."
-                else:
-                    alert_header = "🛡️ *DİRENÇ ALTI SEYİR*"
-                    note = "Fiyat direnç altında oyalanıyor."
+                all_signals.append(signal_msg)
 
-                # Hacim Uyumsuzluğu varsa nota ekle
-                if vol_div:
-                    note = f"{vol_div}\n\n{note}"
-
-                tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
-
-                msg = (f"{alert_header}\n\n"
-                       f"🚨 *SİNYAL: {symbol}*\n"
-                       f"━━━━━━━━━━━━━━━\n"
-                       f"📊 RSI: `{round(rsi, 1)}` | 📈 24s: `%{round(change, 1)}` \n\n"
-                       f"🛒 *1H PARA AKIŞI (USDT):*\n"
-                       f"🟢 Alış: `${round(buy_v/1000, 1)}K` \n"
-                       f"🔴 Satış: `${round(sell_v/1000, 1)}K` \n"
-                       f"⚖️ Oran: `{ratio}`\n\n"
-                       f"📍 *1H DİRENÇ:* `{last_res_1h}`\n"
-                       f"🏛️ *4H DİRENÇ:* `{res_4h}`\n\n"
-                       f"📝 *NOT:* {note}\n"
-                       f"━━━━━━━━━━━━━━━\n"
-                       f"🔗 [Grafiği Aç]({tv_link})")
-                
-                send_telegram(msg)
+    # Tüm sinyaller toplandıktan sonra tek seferde gönder
+    if all_signals:
+        header = "🔍 *PİYASA TARAMA SONUÇLARI*\n━━━━━━━━━━━━━━━\n"
+        footer = f"\n🕒 Toplam {len(all_signals)} coin bulundu."
+        final_report = header + "\n".join(all_signals) + footer
+        send_telegram(final_report)
 
 if __name__ == "__main__":
     scan()
