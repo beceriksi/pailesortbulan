@@ -62,43 +62,50 @@ def scan():
             rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
             
             if rsi > RSI_LIMIT:
-                if last_price >= df['h'].max(): continue # ATH Koruması
+                if last_price >= df['h'].max(): continue 
 
                 p_highs, p_lows = find_custom_sr(df)
                 if not p_highs: continue
                 last_res_1h = p_highs[-1]
 
-                # Yeni Kırılım Filtresi
+                # Yeni Direnç Kırılım Filtresi
                 if df['c'].iloc[-1] > last_res_1h: continue 
 
                 # Alıcı/Satıcı Oranı ve Yorum Mantığı
                 ratio_res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
                 ratio = 1.0
-                alert_status = ""
+                alert_status = "⚠️ *DURUM BELİRSİZ*"
+                durum_notu = "Piyasa akışı takip edilmeli."
                 
                 if ratio_res:
                     b_vol, s_vol = float(ratio_res[0][1]), float(ratio_res[0][2])
                     ratio = round(b_vol / s_vol, 2) if s_vol > 0 else 1.0
                     
-                    if ratio > 1.30:
-                        alert_status = "🚫 *SAKIN EKLEME YAPMA!* (Alıcılar %30+ Baskın)\n"
-                    elif ratio < 0.70:
-                        alert_status = "📉 *SATICILAR BASKIN:* Trend dönüşü beklenebilir.\n"
+                    if ratio > 1.35:
+                        alert_status = "🚫 *SAKIN EKLEME YAPMA!*"
+                        durum_notu = "Alıcılar çok baskın, direnci zorlayabilir."
+                    elif ratio < 0.85:
+                        alert_status = "📉 *SATICILAR GELDİ / SHORT DESTEKLENİYOR*"
+                        durum_notu = "Direnç altında satış baskısı artıyor, tam short vakti."
                     else:
-                        alert_status = "⚖️ *DENGELİ AKIŞ:* Risk iştahı stabil.\n"
+                        alert_status = "🛡️ *DİRENÇ ALTI SEYİR*"
+                        durum_notu = "Fiyat direnç altında oyalanıyor, kırılım gelmedi."
 
                 funding_res = get_data("/api/v5/public/funding-rate", {"instId": symbol})
                 funding = funding_res[0]['fundingRate'] if funding_res else "0"
                 tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
 
-                msg = (f"{alert_status}\n"
+                # ŞİMDİ SENİN İSTEDİĞİN O DOLU DOLU MESAJ
+                msg = (f"{alert_status}\n\n"
                        f"🚨 *SİNYAL: {symbol}*\n"
                        f"━━━━━━━━━━━━━━━\n"
                        f"📊 RSI: `{round(rsi, 1)}` | 📈 24s: `%{round(change, 1)}` \n"
                        f"🏦 Funding: `{funding}` | 🛒 Oran: `{ratio}`\n\n"
                        f"📍 *1H DİRENÇ (Pivot 2-2):* `{last_res_1h}`\n"
                        f"✅ *1H DESTEK (Pivot 2-2):* `{p_lows[-1] if p_lows else 'Yok'}`\n\n"
-                       f"🔗 [Grafiği Aç]({tv_link})")
+                       f"📝 *NOT:* {durum_notu}\n"
+                       f"━━━━━━━━━━━━━━━\n"
+                       f"🔗 [Grafiği TradingView'de Aç]({tv_link})")
                 
                 send_telegram(msg)
 
