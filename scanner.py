@@ -45,16 +45,53 @@ def get_htf_analysis(symbol):
     p_highs, p_lows = find_custom_sr(df_htf)
     curr_c = float(df_htf['c'].iloc[-1])
     
-    # 4H Seviyeleri
     res_4h = min([h for h in p_highs if h > curr_c]) if any(h > curr_c for h in p_highs) else (p_highs[-1] if p_highs else 0)
     sup_4h = max([l for l in p_lows if l < curr_c]) if any(l < curr_c for l in p_lows) else (p_lows[-1] if p_lows else 0)
     
-    # 4H Kırılım Kontrolü (Sadece Uyarı İçin)
     is_htf_break = False
     if p_highs and curr_c > p_highs[-1]:
         is_htf_break = True
         
     return res_4h, sup_4h, is_htf_break
+
+def get_smart_volume(symbol, df_1h):
+    """Rubik API boş dönerse mum yapısından sentetik hacim üretir."""
+    res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
+    buy_v = 0; sell_v = 0
+    
+    if res and len(res) > 0 and float(res[0][1]) > 0:
+        buy_v = float(res[0][1])
+        sell_v = float(res[0][2])
+    else:
+        # API 0 dönerse mum gövdesine göre hacmi paylaştır
+        last = df_1h.iloc[-1]
+        c, o, h, l, v = float(last['c']), float(last['o']), float(last['h']), float(last['l']), float(last['v'])
+        body = abs(c - o)
+        total_range = (h - l) if (h - l) > 0 else 0.0001
+        if c > o:
+            buy_v = v * (0.5 + (body / total_range) * 0.5)
+            sell_v = v - buy_v
+        else:
+            sell_v = v * (0.5 + (body / total_range) * 0.5)
+            buy_v = v - sell_v
+            
+    ratio = round(buy_v / sell_v, 2) if sell_v > 0 else 1.0
+    return buy_v, sell_v, ratio
+
+def check_volume_divergence(df):
+    """Fiyat çıkarken hacim düşüyor mu kontrolü (1H)."""
+    # Son 5 mumdaki trendi incele
+    prices = df['c'].astype(float).iloc[-5:].values
+    volumes = df['v'].astype(float).iloc[-5:].values
+    
+    # Fiyat yükseliyor mu? (Basit trend)
+    price_rising = prices[-1] > prices[0]
+    # Hacim düşüyor mu? (Son 3 mum ortalaması öncekine göre)
+    vol_falling = volumes[-1] < volumes[-3]
+    
+    if price_rising and vol_falling:
+        return "⚠️ *HACİM UYUMSUZLUĞU:* Fiyat yükseliyor ama hacim zayıflıyor!"
+    return ""
 
 def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
@@ -70,39 +107,39 @@ def scan():
             df = pd.DataFrame(candles_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
             df['c'] = df['c'].astype(float)
             
-            # RSI
+            # RSI Hesaplama
             delta = df['c'].diff(); gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rsi = 100 - (100 / (1 + gain / loss)).iloc[-1]
             
             if rsi > RSI_LIMIT:
                 res_4h, sup_4h, htf_break = get_htf_analysis(symbol)
+                buy_v, sell_v, ratio = get_smart_volume(symbol, df)
+                vol_div = check_volume_divergence(df)
                 
                 # 1H Pivotlar
-                p_highs, p_lows = find_custom_sr(df)
-                if not p_highs: continue
-                last_res_1h = p_highs[-1]
+                p_highs, _ = find_custom_sr(df)
+                last_res_1h = p_highs[-1] if p_highs else 0
 
-                # PARA AKIŞI
-                ratio_res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
-                buy_v = 0; sell_v = 0; ratio = 1.0
-                if ratio_res:
-                    buy_v = float(ratio_res[0][1]); sell_v = float(ratio_res[0][2])
-                    ratio = round(buy_v / sell_v, 2) if sell_v > 0 else 1.0
-
-                # DİRENÇ DURUMU VE NOT BELİRLEME
+                # NOT VE BAŞLIK BELİRLEME
                 alert_header = ""
+                note = ""
+                
                 if htf_break:
                     alert_header = "🔥 *DİRENÇ KIRILDI! RİSK ÇOK YÜKSEK*"
                     note = "4H ana direnci üzerinde kapanış geldi, trend çok güçlü!"
                 elif ratio < 0.85:
-                    alert_header = "📉 *SATICILAR GELDİ / SHORT VAKTİ*"
+                    alert_header = "📉 *SATICILAR BASKIN / SHORT?*"
                     note = "Direnç korunuyor, hacimli satışlar başladı."
                 elif ratio > 1.35:
-                    alert_header = "🚫 *SAKIN EKLEME YAPMA!*"
+                    alert_status = "🚫 *SAKIN EKLEME YAPMA!*"
                     note = "Alıcılar çok agresif, direnç zorlanıyor."
                 else:
                     alert_header = "🛡️ *DİRENÇ ALTI SEYİR*"
                     note = "Fiyat direnç altında oyalanıyor."
+
+                # Hacim Uyumsuzluğu varsa nota ekle
+                if vol_div:
+                    note = f"{vol_div}\n\n{note}"
 
                 tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
 
