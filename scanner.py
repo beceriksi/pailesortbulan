@@ -30,9 +30,11 @@ def find_custom_sr(df, pivot_len=2):
     lows = df['l'].astype(float).values
     p_highs, p_lows = [], []
     for i in range(pivot_len, len(highs) - pivot_len):
-        if all(highs[i] > highs[i-j] for j in range(1, pivot_len + 1)) and all(highs[i] > highs[i+j] for j in range(1, pivot_len + 1)):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
             p_highs.append(highs[i])
-        if all(lows[i] < lows[i-j] for j in range(1, pivot_len + 1)) and all(lows[i] < lows[i+j] for j in range(1, pivot_len + 1)):
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
             p_lows.append(lows[i])
     return p_highs, p_lows
 
@@ -42,9 +44,16 @@ def get_htf_analysis(symbol):
     df_htf = pd.DataFrame(candles, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1]
     p_highs, p_lows = find_custom_sr(df_htf)
     curr_c = float(df_htf['c'].iloc[-1])
-    res_4h = min([h for h in p_highs if h > curr_c]) if any(h > curr_c for h in p_highs) else max(df_htf['h'].astype(float))
-    sup_4h = max([l for l in p_lows if l < curr_c]) if any(l < curr_c for l in p_lows) else min(df_htf['l'].astype(float))
-    is_htf_break = curr_c > p_highs[-1] if p_highs else False
+    
+    # 4H Seviyeleri
+    res_4h = min([h for h in p_highs if h > curr_c]) if any(h > curr_c for h in p_highs) else (p_highs[-1] if p_highs else 0)
+    sup_4h = max([l for l in p_lows if l < curr_c]) if any(l < curr_c for l in p_lows) else (p_lows[-1] if p_lows else 0)
+    
+    # 4H Kırılım Kontrolü (Sadece Uyarı İçin)
+    is_htf_break = False
+    if p_highs and curr_c > p_highs[-1]:
+        is_htf_break = True
+        
     return res_4h, sup_4h, is_htf_break
 
 def scan():
@@ -67,38 +76,43 @@ def scan():
             
             if rsi > RSI_LIMIT:
                 res_4h, sup_4h, htf_break = get_htf_analysis(symbol)
-                if htf_break: continue # 4H Direnç kırıldıysa Short yok
-
+                
+                # 1H Pivotlar
                 p_highs, p_lows = find_custom_sr(df)
                 if not p_highs: continue
                 last_res_1h = p_highs[-1]
-                if df['c'].iloc[-1] > last_res_1h: continue 
 
-                # PARA AKIŞI VERİSİ (USDT BAZLI)
+                # PARA AKIŞI
                 ratio_res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
-                buy_vol_usdt = 0; sell_vol_usdt = 0; ratio = 1.0
-                alert_status = "🛡️ *DİRENÇ ALTI SEYİR*"; note = "Fiyat direnç altında."
-                
+                buy_v = 0; sell_v = 0; ratio = 1.0
                 if ratio_res:
-                    buy_vol_usdt = float(ratio_res[0][1]) # USDT cinsinden alım
-                    sell_vol_usdt = float(ratio_res[0][2]) # USDT cinsinden satış
-                    ratio = round(buy_vol_usdt / sell_vol_usdt, 2) if sell_vol_usdt > 0 else 1.0
-                    
-                    if ratio > 1.35:
-                        alert_status = "🚫 *SAKIN EKLEME YAPMA!*"; note = "Alıcılar agresif, direnç kırılabilir."
-                    elif ratio < 0.85:
-                        alert_status = "📉 *SATICILAR GELDİ / SHORT VAKTİ*"; note = "Satış hacmi alışı geçti, direnç korunuyor."
+                    buy_v = float(ratio_res[0][1]); sell_v = float(ratio_res[0][2])
+                    ratio = round(buy_v / sell_v, 2) if sell_v > 0 else 1.0
+
+                # DİRENÇ DURUMU VE NOT BELİRLEME
+                alert_header = ""
+                if htf_break:
+                    alert_header = "🔥 *DİRENÇ KIRILDI! RİSK ÇOK YÜKSEK*"
+                    note = "4H ana direnci üzerinde kapanış geldi, trend çok güçlü!"
+                elif ratio < 0.85:
+                    alert_header = "📉 *SATICILAR GELDİ / SHORT VAKTİ*"
+                    note = "Direnç korunuyor, hacimli satışlar başladı."
+                elif ratio > 1.35:
+                    alert_header = "🚫 *SAKIN EKLEME YAPMA!*"
+                    note = "Alıcılar çok agresif, direnç zorlanıyor."
+                else:
+                    alert_header = "🛡️ *DİRENÇ ALTI SEYİR*"
+                    note = "Fiyat direnç altında oyalanıyor."
 
                 tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
 
-                # MESAJ TASARIMI (USDT Hacimli)
-                msg = (f"{alert_status}\n\n"
+                msg = (f"{alert_header}\n\n"
                        f"🚨 *SİNYAL: {symbol}*\n"
                        f"━━━━━━━━━━━━━━━\n"
-                       f"📊 RSI: `{round(rsi, 1)}` | 📈 24s: `%{round(change, 1)}` \n"
+                       f"📊 RSI: `{round(rsi, 1)}` | 📈 24s: `%{round(change, 1)}` \n\n"
                        f"🛒 *1H PARA AKIŞI (USDT):*\n"
-                       f"🟢 Alış: `${round(buy_vol_usdt/1000, 1)}K` \n"
-                       f"🔴 Satış: `${round(sell_vol_usdt/1000, 1)}K` \n"
+                       f"🟢 Alış: `${round(buy_v/1000, 1)}K` \n"
+                       f"🔴 Satış: `${round(sell_v/1000, 1)}K` \n"
                        f"⚖️ Oran: `{ratio}`\n\n"
                        f"📍 *1H DİRENÇ:* `{last_res_1h}`\n"
                        f"🏛️ *4H DİRENÇ:* `{res_4h}`\n\n"
