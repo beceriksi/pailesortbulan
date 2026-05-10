@@ -19,7 +19,7 @@ def send_telegram(msg):
                 "chat_id": CHAT_ID, 
                 "text": msg, 
                 "parse_mode": "Markdown", 
-                "disable_web_page_preview": True
+                "disable_web_page_preview": False # Link önizlemesi için False yapıldı
             })
         except: pass
 
@@ -38,7 +38,7 @@ def find_custom_sr(df, pivot_len=2):
         if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
            highs[i] > highs[i+1] and highs[i] > highs[i+2]:
             p_highs.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+        if lows[i] < lows[i-1] < lows[i-2] and \
            lows[i] < lows[i+1] and lows[i] < lows[i+2]:
             p_lows.append(lows[i])
     return p_highs, p_lows
@@ -94,6 +94,11 @@ def scan():
                 bv, sv, ratio = get_smart_volume(symbol, df_1h)
                 div = check_volume_divergence(df_1h)
 
+                # TradingView Link Oluşturma (Perpetual Swap Formatı)
+                # Örnek: BTC-USDT-SWAP -> OKX:BTCUSDT.P
+                tv_clean = symbol.replace('-SWAP', '').replace('-', '')
+                tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{tv_clean}.P"
+
                 # STRATEJİK YORUM
                 if last_p > res_4h and res_4h != 0: note = "🔥 *KIRILIM:* 4H Direnç üstü kapanış, tehlikeli!"
                 elif (res_1h - last_p) / last_p < 0.006: note = "🚨 *DİRENÇTE:* Fiyat dirençten satış yemeye çalışıyor."
@@ -106,6 +111,7 @@ def scan():
                 all_signals.append(f"*{symbol}* | RSI: `{round(rsi, 1)}` | %{round(chg, 1)}\n"
                                    f"{note}\n"
                                    f"⚖️ Oran: `{ratio}` | 🏛️ 4H: `{res_1h}` | 📍 1H: `{res_1h}`{div_msg}\n"
+                                   f"🔗 [Grafiği Aç (TradingView)]({tv_link})\n"
                                    f"━━━━━━━━━━━━━━━")
                 
     if all_signals:
