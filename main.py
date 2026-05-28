@@ -93,6 +93,36 @@ def check_volume_divergence(df):
         return "⚠️ *AYI UYUMSUZLUĞU (Düşüş Beklentisi)*"
     return ""
 
+# GÜNCELLENEN ACİL DURUM 15 DAKİKALIK MUM KONTROLÜ
+def check_candle_trigger_15m(symbol):
+    c_15m = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "15m", "limit": "5"})
+    if not c_15m:
+        return "⚠️ 15m veri hatası", False
+    
+    df_15m = pd.DataFrame(c_15m, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
+    last = df_15m.iloc[-1]
+    o, h, l, c = float(last['o']), float(last['h']), float(last['l']), float(last['c'])
+    
+    body = abs(c - o)
+    upper_wick = (h - max(o, c)) if h > max(o, c) else 0
+    
+    # 15 dakikalıkta satıcılar baskınsa (Kırmızı mum VEYA uzun üst iğne)
+    if c < o or upper_wick > (body * 0.8):
+        return "🚨 *ACİL DURUM: REAKSİYON MUMU GELDİ (15m)*", True
+    else:
+        return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", False
+
+def get_funding_rate(symbol):
+    res = get_data("/api/v5/public/funding-rate", {"instId": symbol})
+    if res and len(res) > 0:
+        rate = float(res[0].get('fundingRate', 0))
+        rate_pct = rate * 100
+        if rate_pct < -0.05:
+            return f"`%{rate_pct:.3f}` ⚠️ *AŞIRI NEGATİF FL*"
+        else:
+            return f"`%{rate_pct:.3f}`"
+    return "`Veri Alınamadı`"
+
 def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
     url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=OKX:{tv_symbol}.P&interval=60&theme=dark&style=1"
     try:
@@ -119,21 +149,22 @@ def analyze_charts_with_gemini(signals_data):
         prompt = """
         Sen üst düzey bir kripto para teknik analisti ve kurumsal bir short (açığa satış) trader'ısın.
         Sana şu anda tarayıcı botumdan yakalanan ve aşırı şişmiş (RSI > 70 ve %8 üstü yükselmiş) coinlerin 1 Saatlik grafiklerini ve anlık teknik verilerini gönderiyorum.
+        Sana iletilen verilerin içinde anlık "15 DAKİKALIK REAKSİYON/ACİL DURUM MUMU" bilgisi de bulunmaktadır.
         
         Senden ricam analizi TAM OLARAK şu iki aşamada ve şu şablonda hazırlaman:
         
         1. BÖLÜM: TÜM LİSTEYE BAKIŞ (SANA GÖNDERİLEN SIRA İLE)
-        Sana aşağıda verdiğim sırayı ASLA bozmadan, her coin için grafik yapısına ve verilere bakarak sadece 1-2 cümlelik çok kısa ve öz bir kurumsal trader yorumu yaz.
+        Sana aşağıda verdiğim sırayı ASLA bozmadan, her coin için grafik yapısına ve özellikle "15m Acil Durum Reaksiyon Mumu" durumuna bakarak sadece 1-2 cümlelik net bir yorum yaz.
         Formatı şöyle olsun:
-        • **[COIN ADI]**: [Buraya 1-2 cümlelik hap teknik/hacimsel yorumun]
+        • **[COIN ADI]**: [Buraya 1-2 cümlelik hap teknik yorumun. 15m acil durum onayı varsa bunu kesinlikle vurgula]
         
         2. BÖLÜM: 👑 GEMINI ALFA SEÇİMİ
-        Yukarıdaki listeden kısa vadeli (scalping) SHORT pozisyon açmak için EN GÜVENLİ, yapısı en çok bozulan và düşüş olasılığı en yüksek olan 1 ADET coini seç ve detaylandır:
+        Yukarıdaki listeden kısa vadeli (scalping) SHORT pozisyon açmak için EN GÜVENLİ, yapısı en çok bozulan, 15m reaksiyon mumu tetiklenmiş olan 1 ADET coini seç ve detaylandır:
         🎯 **İşlem Yapılacak Coin:** [COIN ADI]
-        💡 **Neden Bu Grafik? (Detaylı Teknik Gerekçe):** [Seçtiğin coinin mum hareketlerini, iğnelerini ve hacim yapısını detaylıca açıkla]
+        💡 **Neden Bu Grafik? (Detaylı Teknik Gerekçe):** [Seçtiğin coinin mum hareketlerini, anlık 15m tepkisini ve hacim yapısını kurumsal bir dille açıkla]
         🛑 **Risk & Stop Yönetimi:** [İptal seviyesi veya dikkat edilecek direnç noktası]
         
-        Lütfen bu şablonun dışına çıkma, gereksiz felsefe yapma, doğrudan konuya gir.
+        Lütfen bu şablonun dışına çıkma, doğrudan konuya gir.
         """
         
         contents.append(prompt)
@@ -157,10 +188,8 @@ def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
     if not tickers: return
 
-    # Sadece gerçek kripto tabanlı varlıkların (Underlying) listesini çekiyoruz
     underlyings = get_data("/api/v5/public/underlying", {"instType": "SWAP"})
     
-    # HATA VEREN KISIM GÜVENLİ HALE GETİRİLDİ (Sözlük ve Liste yapılarını otomatik ayrıştırır)
     valid_cryptos = []
     if underlyings and isinstance(underlyings, list):
         for item in underlyings:
@@ -177,10 +206,7 @@ def scan():
         symbol = t['instId']
         if "-USDT-" not in symbol: continue
         
-        # Sembolün kök adını alıyoruz (Örn: BTC-USDT-SWAP -> BTC)
         base_coin = symbol.split('-')[0]
-        
-        # Gerçek kripto listesinde yoksa direkt pas geç (Hisseleri ve endeksleri eler)
         if valid_cryptos and base_coin not in valid_cryptos:
             continue
         
@@ -218,6 +244,10 @@ def scan():
 
                     bv, sv, ratio = get_smart_volume(symbol, df_1h)
                     div = check_volume_divergence(df_1h)
+                    
+                    # 15 DAKİKALIK DETAYLI ONAY KONTROLÜ
+                    candle_text, is_urgent = check_candle_trigger_15m(symbol)
+                    funding_info = get_funding_rate(symbol)
 
                     # STRATEJİK YORUM MANTIĞI
                     if last_p > res_4h and res_4h != 0: 
@@ -236,7 +266,7 @@ def scan():
                     
                     print(f"📸 {symbol} için grafik çekiliyor...")
                     if take_tradingview_screenshot(tv_clean, img_name):
-                        text_summary = f"Fiyat: {last_p} | 4H: {res_4h} | 1H: {res_1h}"
+                        text_summary = f"Fiyat: {last_p} | 4H Dir: {res_4h} | 1H Dir: {res_1h} | 15m Durum: {candle_text} | Funding: {funding_info}"
                         
                         detected_signals.append({
                             "symbol": symbol,
@@ -247,6 +277,9 @@ def scan():
                             "ratio": ratio,
                             "div": div,
                             "note": note,
+                            "candle": candle_text,
+                            "urgent": is_urgent, # Öncelik sıralaması için saklıyoruz
+                            "funding": funding_info,
                             "tv_link": f"https://www.tradingview.com/chart/?symbol=OKX:{tv_clean}.P"
                         })
                     time.sleep(0.5)
@@ -257,13 +290,18 @@ def scan():
 
     # Telegram ve Yapay Zeka Çıktı Aşaması
     if detected_signals:
-        # 1. MESAJ: Tüm listeyi ve stratejik notları Telegram'a atar
+        # CRITICAL PRO HAMLE: 15m Acil onay alan coinleri listenin EN BAŞINA taşıyoruz
+        detected_signals.sort(key=lambda x: x['urgent'], reverse=True)
+
+        # 1. MESAJ: Telegram listesi
         header = "🚨 *TEKNİK ALARM VEREN COİNLER* 🚨\n━━━━━━━━━━━━━━━\n"
         list_elements = []
         for s in detected_signals:
             div_text = f" | {s['div']}" if s['div'] else ""
             item_msg = (f"• *{s['symbol']}* | RSI: `{s['rsi']}` | %{s['chg']}\n"
                         f"  👉 {s['note']}{div_text}\n"
+                        f"  ⏳ {s['candle']}\n"
+                        f"  💰 Fonlama Oranı: {s['funding']}\n"
                         f"  ⚖️ Hacim Oranı: `{s['ratio']}`\n"
                         f"  🔗 [Grafiği Aç]({s['tv_link']})\n"
                         f"  ━━━━━━━━━━━━━━━")
@@ -271,8 +309,8 @@ def scan():
             
         send_telegram_text(header + "\n".join(list_elements))
         
-        # 2. MESAJ: Gemini resimleri sırasıyla inceler, yorumlar ve şampiyonu seçer
-        print("🤖 Gemini grafikleri analiz ediyor...")
+        # 2. MESAJ: Gemini Analizi
+        print("🤖 Gemini grafikleri ve anlık 15m verilerini analiz ediyor...")
         ai_report = analyze_charts_with_gemini(detected_signals)
         
         if ai_report:
