@@ -1,6 +1,5 @@
 requests
 pandas
-numpy
-playwright
-google-genai
 pillow
+google-genai
+playwright
