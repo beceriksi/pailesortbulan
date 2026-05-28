@@ -7,7 +7,7 @@ from google import genai
 from google.genai import types
 from playwright.sync_api import sync_playwright
 
-# ENV / SECRETS
+# ENV / SECRETS (GitHub veya Bilgisayarınızdan Alınır)
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -23,7 +23,8 @@ def send_telegram_text(msg):
             requests.post(url, json={
                 "chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True
             }, timeout=10)
-        except Exception as e: print(f"Telegram metin hatası: {e}")
+        except Exception as e: 
+            print(f"Telegram metin hatası: {e}")
 
 def send_telegram_photo(photo_path, caption):
     if TOKEN and CHAT_ID and os.path.exists(photo_path):
@@ -31,26 +32,74 @@ def send_telegram_photo(photo_path, caption):
         try:
             with open(photo_path, 'rb') as photo:
                 requests.post(url, data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "Markdown"}, files={"photo": photo}, timeout=15)
-        except Exception as e: print(f"Telegram fotoğraf hatası: {e}")
+        except Exception as e: 
+            print(f"Telegram fotoğraf hatası: {e}")
 
 def get_data(endpoint, params={}):
     base = "https://www.okx.com"
     try:
         res = requests.get(base + endpoint, params=params, timeout=10).json()
         return res.get('data', [])
-    except: return []
+    except: 
+        return []
+
+def find_custom_sr(df, pivot_len=2):
+    if len(df) < (pivot_len * 2 + 1):
+        return [], []
+        
+    highs = df['h'].astype(float).values
+    lows = df['l'].astype(float).values
+    p_highs, p_lows = [], []
+    
+    for i in range(pivot_len, len(highs) - pivot_len):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            p_highs.append(highs[i])
+            
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            p_lows.append(lows[i])
+            
+    return p_highs, p_lows
+
+def get_smart_volume(symbol, df_1h):
+    res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
+    buy_v, sell_v = 0, 0
+    
+    if res and len(res) > 0 and len(res[0]) > 2 and float(res[0][1]) > 0:
+        buy_v = float(res[0][1])
+        sell_v = float(res[0][2])
+    else:
+        if not df_1h.empty:
+            last = df_1h.iloc[-1]
+            c, o, h, l, v = float(last['c']), float(last['o']), float(last['h']), float(last['l']), float(last['v'])
+            body = abs(c - o)
+            total_range = (h - l) if (h - l) > 0 else 0.0001
+            if c > o: 
+                buy_v = v * (0.5 + (body / total_range) * 0.5)
+                sell_v = v - buy_v
+            else: 
+                sell_v = v * (0.5 + (body / total_range) * 0.5)
+                buy_v = v - sell_v
+                
+    return buy_v, sell_v, round(buy_v / sell_v, 2) if sell_v > 0 else 1.0
+
+def check_volume_divergence(df):
+    if len(df) < 5:
+        return ""
+    p = df['c'].astype(float).iloc[-5:].values
+    v = df['v'].astype(float).iloc[-5:].values
+    if p[-1] > p[0] and v[-1] < v[-2]: 
+        return "⚠️ *AYI UYUMSUZLUĞU (Düşüş Beklentisi)*"
+    return ""
 
 def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
-    """Tarayıcıyı gizli modda açar, TradingView grafiğinin yüklenmesini bekler ve ekran görüntüsü alır."""
-    # TradingView ücretsiz grafik widget'ı reklam barındırmayan temiz bir görünüm sunar
     url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=OKX:{tv_symbol}.P&interval=60&theme=dark&style=1"
-    
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(url)
-            # Grafik elementlerinin ve mumların tamamen çizilmesi için 3.5 saniye bekleme
             page.wait_for_timeout(3500)
             page.screenshot(path=output_path)
             browser.close()
@@ -60,16 +109,11 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
         return False
 
 def analyze_charts_with_gemini(signals_data):
-    """
-    signals_data: List of dict -> [{'symbol': 'BTC-USDT-SWAP', 'img_path': '...', 'text_data': '...'}, ...]
-    """
     if not GEMINI_API_KEY or not signals_data:
         return None
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # Gemini'ye göndereceğimiz çoklu içerik (Multimodal) listesini hazırlıyoruz
         contents = []
         
         prompt = """
@@ -92,14 +136,12 @@ def analyze_charts_with_gemini(signals_data):
         
         contents.append(prompt)
         
-        # Her bir sinyalin görselini ve metnini analiz havuzuna ekliyoruz
         for item in signals_data:
             if os.path.exists(item['img_path']):
                 img = Image.open(item['img_path'])
                 contents.append(img)
                 contents.append(f"Coin: {item['symbol']} Teknik Özeti:\n{item['text_data']}\n\n")
         
-        # Görsel işleme yeteneği en yüksek ve güncel olan modelimizi çağırıyoruz
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=contents,
@@ -126,7 +168,7 @@ def scan():
             chg = (last_p / open_24h - 1) * 100
             
             if chg > CHANGE_24H_LIMIT:
-                c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "50"})
+                c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "100"})
                 if not c_1h: continue
                 
                 df_1h = pd.DataFrame(c_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
@@ -141,53 +183,88 @@ def scan():
                 rsi = 100 - (100 / (1 + last_g / last_l)) if last_l != 0 else (100 if last_g > 0 else 50)
                 
                 if rsi > RSI_LIMIT:
-                    # TradingView için temiz isim (Örn: BTCUSDT)
+                    c_4h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "4H", "limit": "100"})
+                    if not c_4h: continue
+                    df_4h = pd.DataFrame(c_4h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
+                    
+                    ph_4h, _ = find_custom_sr(df_4h)
+                    res_4h = min([x for x in ph_4h if x > last_p]) if any(x > last_p for x in ph_4h) else (ph_4h[-1] if ph_4h else 0)
+                    
+                    ph_1h, _ = find_custom_sr(df_1h)
+                    res_1h = min([x for x in ph_1h if x > last_p]) if any(x > last_p for x in ph_1h) else (ph_1h[-1] if ph_1h else 0)
+
+                    bv, sv, ratio = get_smart_volume(symbol, df_1h)
+                    div = check_volume_divergence(df_1h)
+
+                    # STRATEJİK YORUM MANTIĞI
+                    if last_p > res_4h and res_4h != 0: 
+                        note = "🔥 *KIRILIM:* 4H Direnç üstü kapanış, tehlikeli!"
+                    elif res_1h != 0 and (res_1h - last_p) / last_p < 0.006: 
+                        note = "🚨 *DİRENÇTE:* Fiyat dirençten satış yemeye çalışıyor."
+                    elif ratio < 0.85: 
+                        note = "📉 *SATIŞ BASKISI:* Direnç altı hacimli satışlar başladı."
+                    elif ratio > 1.35: 
+                        note = "🚫 *ZİRVEDE ALICI:* FOMO var, ekleme yapmak riskli."
+                    else: 
+                        note = "🛡️ *GÖZLEM:* Direnç altı kararsız yapı."
+
                     tv_clean = symbol.replace('-SWAP', '').replace('-', '')
                     img_name = f"{symbol}_1h.png"
                     
-                    print(f"📸 {symbol} için grafik fotoğrafı çekiliyor...")
-                    # Grafiği çekip diske kaydediyoruz
+                    print(f"📸 {symbol} için grafik çekiliyor...")
                     if take_tradingview_screenshot(tv_clean, img_name):
-                        text_summary = f"Fiyat: {last_p}, 24s Değişim: %{round(chg,1)}, RSI(14): {round(rsi,1)}"
+                        text_summary = f"Fiyat: {last_p} | 4H: {res_4h} | 1H: {res_1h}"
                         
                         detected_signals.append({
                             "symbol": symbol,
                             "img_path": img_name,
                             "text_data": text_summary,
+                            "rsi": round(rsi, 1),
+                            "chg": round(chg, 1),
+                            "ratio": ratio,
+                            "div": div,
+                            "note": note,
                             "tv_link": f"https://www.tradingview.com/chart/?symbol=OKX:{tv_clean}.P"
                         })
-                    time.sleep(0.5) # API ve tarayıcıyı yormamak için
+                    time.sleep(0.5)
                     
         except Exception as e:
             print(f"{symbol} taranırken hata: {e}")
             continue
 
-    # Yapay Zeka Karar Aşaması
+    # Telegram ve Yapay Zeka Çıktı Aşaması
     if detected_signals:
-        # Önce Telegram'a ham listeyi duyuruyoruz
+        # 1. MESAJ: Tüm listeyi ve stratejik notları (Ayı Uyumsuzluğu, FOMO vb.) Telegram'a atar
         header = "🚨 *TEKNİK ALARM VEREN COİNLER* 🚨\n━━━━━━━━━━━━━━━\n"
-        list_msg = header + "\n".join([f"• [{s['symbol']}]({s['tv_link']}) | {s['text_data']}" for s in detected_signals])
-        send_telegram_text(list_msg)
+        list_elements = []
+        for s in detected_signals:
+            div_text = f" | {s['div']}" if s['div'] else ""
+            item_msg = (f"• *{s['symbol']}* | RSI: `{s['rsi']}` | %{s['chg']}\n"
+                        f"  👉 {s['note']}{div_text}\n"
+                        f"  ⚖️ Hacim Oranı: `{s['ratio']}`\n"
+                        f"  🔗 [Grafiği Aç]({s['tv_link']})\n"
+                        f"  ━━━━━━━━━━━━━━━")
+            list_elements.append(item_msg)
+            
+        send_telegram_text(header + "\n".join(list_elements))
         
-        # Gemini'ye resimleri gönderip şampiyonu seçtiriyoruz
-        print("🤖 Gemini tüm grafikleri inceliyor ve en iyi işlemi seçiyor...")
+        # 2. MESAJ: Gemini tüm resimleri inceler ve en mantıklı olanı seçer
+        print("🤖 Gemini grafikleri analiz ediyor...")
         ai_report = analyze_charts_with_gemini(detected_signals)
         
         if ai_report:
-            # Yapay zekanın seçtiği coini metinden ayıklamaya çalışıp o resmi rapora ekleyelim
             selected_photo = None
             for s in detected_signals:
-                if s['symbol'].split('-')[0] in ai_report: # Örn: "BTC" raporda geçiyor mu?
+                if s['symbol'].split('-')[0] in ai_report:
                     selected_photo = s['img_path']
                     break
             
-            # Eğer eşleşen coin resmi bulunduysa o resmi Gemini raporu açıklamasıyla gönderiyoruz
             if selected_photo:
                 send_telegram_photo(selected_photo, ai_report)
             else:
                 send_telegram_text(ai_report)
                 
-        # İşimiz bitince oluşturulan geçici resim dosyalarını temizliyoruz
+        # Temizlik
         for s in detected_signals:
             if os.path.exists(s['img_path']):
                 os.remove(s['img_path'])
