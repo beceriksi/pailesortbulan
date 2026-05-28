@@ -128,7 +128,7 @@ def analyze_charts_with_gemini(signals_data):
         • **[COIN ADI]**: [Buraya 1-2 cümlelik hap teknik/hacimsel yorumun]
         
         2. BÖLÜM: 👑 GEMINI ALFA SEÇİMİ
-        Yukarıdaki listeden kısa vadeli (scalping) SHORT pozisyon açmak için EN GÜVENLİ, yapısı en çok bozulan ve düşüş olasılığı en yüksek olan 1 ADET coini seç ve detaylandır:
+        Yukarıdaki listeden kısa vadeli (scalping) SHORT pozisyon açmak için EN GÜVENLİ, yapısı en çok bozulan và düşüş olasılığı en yüksek olan 1 ADET coini seç ve detaylandır:
         🎯 **İşlem Yapılacak Coin:** [COIN ADI]
         💡 **Neden Bu Grafik? (Detaylı Teknik Gerekçe):** [Seçtiğin coinin mum hareketlerini, iğnelerini ve hacim yapısını detaylıca açıkla]
         🛑 **Risk & Stop Yönetimi:** [İptal seviyesi veya dikkat edilecek direnç noktası]
@@ -157,9 +157,19 @@ def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
     if not tickers: return
 
-    # 1. YÖNTEM FİLTRESİ: Sadece gerçek kripto tabanlı varlıkların (Underlying) listesini çekiyoruz
+    # Sadece gerçek kripto tabanlı varlıkların (Underlying) listesini çekiyoruz
     underlyings = get_data("/api/v5/public/underlying", {"instType": "SWAP"})
-    valid_cryptos = [item['underlying'] for item in underlyings] if underlyings else []
+    
+    # HATA VEREN KISIM GÜVENLİ HALE GETİRİLDİ (Sözlük ve Liste yapılarını otomatik ayrıştırır)
+    valid_cryptos = []
+    if underlyings and isinstance(underlyings, list):
+        for item in underlyings:
+            if isinstance(item, dict) and 'underlying' in item:
+                valid_cryptos.append(item['underlying'])
+            elif isinstance(item, list) and len(item) > 0:
+                valid_cryptos.append(item[0])
+            elif isinstance(item, str):
+                valid_cryptos.append(item)
 
     detected_signals = []
     
@@ -247,7 +257,7 @@ def scan():
 
     # Telegram ve Yapay Zeka Çıktı Aşaması
     if detected_signals:
-        # 1. MESAJ: Tüm listeyi ve stratejik notları (Ayı Uyumsuzluğu vb.) Telegram'a atar
+        # 1. MESAJ: Tüm listeyi ve stratejik notları Telegram'a atar
         header = "🚨 *TEKNİK ALARM VEREN COİNLER* 🚨\n━━━━━━━━━━━━━━━\n"
         list_elements = []
         for s in detected_signals:
