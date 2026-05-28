@@ -120,18 +120,20 @@ def analyze_charts_with_gemini(signals_data):
         Sen üst düzey bir kripto para teknik analisti ve kurumsal bir short (açığa satış) trader'ısın.
         Sana şu anda tarayıcı botumdan yakalanan ve aşırı şişmiş (RSI > 70 ve %8 üstü yükselmiş) coinlerin 1 Saatlik grafiklerini ve anlık teknik verilerini gönderiyorum.
         
-        Senden ricam:
-        1. Gönderilen tüm grafikleri (mum yapılarını, trendlerin yorulma iğnelerini, direnç bölgelerini) ve metin verilerini birbiriyle kıyasla.
-        2. İçlerinden kısa vadeli (scalping/day-trade) SHORT pozisyon açmak için EN GÜVENLİ, yapısı en çok bozulan ve düşüş olasılığı en yüksek olan 1 ADET coini seç.
-        3. Seçtiğin coini ve nedenini harika bir üslupla, teknik gerekçeleriyle (mum iğneleri, hacim, direnç ihlali vb.) açıkla. Kısa, vurucu ve net ol.
+        Senden ricam analizi TAM OLARAK şu iki aşamada ve şu şablonda hazırlaman:
         
-        Analizini tam olarak şu taslakta teslim et:
-        👑 **GEMINI ALFA SEÇİMİ**
+        1. BÖLÜM: TÜM LİSTEYE BAKIŞ (SANA GÖNDERİLEN SIRA İLE)
+        Sana aşağıda verdiğim sırayı ASLA bozmadan, her coin için grafik yapısına ve verilere bakarak sadece 1-2 cümlelik çok kısa ve öz bir kurumsal trader yorumu yaz.
+        Formatı şöyle olsun:
+        • **[COIN ADI]**: [Buraya 1-2 cümlelik hap teknik/hacimsel yorumun]
+        
+        2. BÖLÜM: 👑 GEMINI ALFA SEÇİMİ
+        Yukarıdaki listeden kısa vadeli (scalping) SHORT pozisyon açmak için EN GÜVENLİ, yapısı en çok bozulan ve düşüş olasılığı en yüksek olan 1 ADET coini seç ve detaylandır:
         🎯 **İşlem Yapılacak Coin:** [COIN ADI]
+        💡 **Neden Bu Grafik? (Detaylı Teknik Gerekçe):** [Seçtiğin coinin mum hareketlerini, iğnelerini ve hacim yapısını detaylıca açıkla]
+        🛑 **Risk & Stop Yönetimi:** [İptal seviyesi veya dikkat edilecek direnç noktası]
         
-        💡 **Neden Bu Grafik? (Teknik Gerekçe):** (Buraya grafik üzerindeki mum hareketlerine ve verilere dayanarak seçme nedenini maksimum 3 cümle ile açıkla)
-        
-        🛑 **Risk & Stop Yönetimi:** (İşlemin iptal olması gereken direnç seviyesi veya dikkat edilecek nokta)
+        Lütfen bu şablonun dışına çıkma, gereksiz felsefe yapma, doğrudan konuya gir.
         """
         
         contents.append(prompt)
@@ -155,11 +157,22 @@ def scan():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
     if not tickers: return
 
+    # 1. YÖNTEM FİLTRESİ: Sadece gerçek kripto tabanlı varlıkların (Underlying) listesini çekiyoruz
+    underlyings = get_data("/api/v5/public/underlying", {"instType": "SWAP"})
+    valid_cryptos = [item['underlying'] for item in underlyings] if underlyings else []
+
     detected_signals = []
     
     for t in tickers:
         symbol = t['instId']
         if "-USDT-" not in symbol: continue
+        
+        # Sembolün kök adını alıyoruz (Örn: BTC-USDT-SWAP -> BTC)
+        base_coin = symbol.split('-')[0]
+        
+        # Gerçek kripto listesinde yoksa direkt pas geç (Hisseleri ve endeksleri eler)
+        if valid_cryptos and base_coin not in valid_cryptos:
+            continue
         
         try:
             last_p = float(t['last'])
@@ -234,7 +247,7 @@ def scan():
 
     # Telegram ve Yapay Zeka Çıktı Aşaması
     if detected_signals:
-        # 1. MESAJ: Tüm listeyi ve stratejik notları (Ayı Uyumsuzluğu, FOMO vb.) Telegram'a atar
+        # 1. MESAJ: Tüm listeyi ve stratejik notları (Ayı Uyumsuzluğu vb.) Telegram'a atar
         header = "🚨 *TEKNİK ALARM VEREN COİNLER* 🚨\n━━━━━━━━━━━━━━━\n"
         list_elements = []
         for s in detected_signals:
@@ -248,7 +261,7 @@ def scan():
             
         send_telegram_text(header + "\n".join(list_elements))
         
-        # 2. MESAJ: Gemini tüm resimleri inceler ve en mantıklı olanı seçer
+        # 2. MESAJ: Gemini resimleri sırasıyla inceler, yorumlar ve şampiyonu seçer
         print("🤖 Gemini grafikleri analiz ediyor...")
         ai_report = analyze_charts_with_gemini(detected_signals)
         
