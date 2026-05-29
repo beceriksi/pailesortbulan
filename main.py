@@ -316,14 +316,17 @@ def scan():
             if ai_report:
                 selected_photo = None
                 for s in detected_signals:
+                    coin_pure = s['symbol'].split('-')[0].upper()
                     if s['img_path'] != "NO_IMAGE" and os.path.exists(s['img_path']):
-                        if s['symbol'].split('-')[0].upper() in ai_report.upper():
+                        if coin_pure in ai_report.upper():
                             selected_photo = s['img_path']
+                            print(f"📸 Gemini analizi için fotoğraf eşleşti: {s['symbol']}")
                             break
                 
                 if selected_photo:
                     send_telegram_photo(selected_photo, ai_report)
                 else:
+                    print("⚠️ Fotoğraf eşleşmedi, analiz düz metin olarak gönderiliyor...")
                     send_telegram_text(ai_report)
         except Exception as e:
             print(f"Gemini aşaması hatası: {e}")
