@@ -1,38 +1,35 @@
-name: Crypto Scanner Bot
+name: Crypto Short Bot
 
 on:
   schedule:
-    # Her 1 saatte bir otomatik çalışır (İstersen süreyi değiştirebilirsin)
-    - cron: '0 * * * *'
-  workflow_dispatch: # GitHub panelinden elle (manuel) tetiklemek için
+    - cron: '*/15 * * * *' # Her 15 dakikada bir çalıştır
+  workflow_dispatch: # Manuel tetikleme butonu
 
 jobs:
-  run-scanner:
+  run-bot:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Depoyu Klonla (Checkout)
-      uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Python Kurulumu
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-        cache: 'pip' # Hızlı çalışması için önbellekleme yapar
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Gerekli Kütüphaneleri Kur
-      run: |
-        python - lobbyists install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Playwright Sistem Bağımlılıklarını ve Tarayıcıyı Kur
-      run: |
-        # Ekran görüntüsü alabilmek için sanal tarayıcıyı ayağa kaldırır
-        playwright install chromium --with-deps
+      # 🚨 EKSİK OLAN VE BOTU ENGELLEYEN KRİTİK ADIM BURASI:
+      - name: Install Playwright Chromium
+        run: |
+          playwright install chromium --with-deps
 
-    - name: Botu Çalıştır
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      run: python main.py
+      - name: Run Script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main.py
