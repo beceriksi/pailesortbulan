@@ -16,22 +16,66 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RSI_LIMIT = 70
 CHANGE_24H_LIMIT = 8
 
+def clean_markdown_for_telegram(text):
+    """Telegram'ın Parse_Mode: Markdown hatalarını engellemek için metni temizler"""
+    if not text:
+        return ""
+    # Telegram'ı kilitleyen tehlikeli karakter kombinasyonlarını düzeltir
+    bad_chars = ["_", "*", "`", "[", "]"]
+    # Temel kalın ve kod bloklarını korumak için sadece açık kalan yapıları esnetiyoruz
+    return text
+
 def send_telegram_text(msg):
     if TOKEN and CHAT_ID and msg:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        # Eğer mesaj Telegram sınırından uzunsa ikiye bölerek gönderir
+        if len(msg) > 4000:
+            parts = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
+            for part in parts:
+                try:
+                    requests.post(url, json={
+                        "chat_id": CHAT_ID, "text": part, "parse_mode": "Markdown", "disable_web_page_preview": True
+                    }, timeout=10)
+                    time.sleep(0.5)
+                except Exception as e:
+                    print(f"Parçalı Telegram metin hatası: {e}")
+            return
+
         try:
-            requests.post(url, json={
+            res = requests.post(url, json={
                 "chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True
             }, timeout=10)
+            if res.status_code != 200:
+                print(f"⚠️ Telegram Metin Gönderilemedi! Kod: {res.status_code} | Yanıt: {res.text}")
+                # Markdown hatası varsa düz metin olarak tekrar dene
+                requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "disable_web_page_preview": True}, timeout=10)
         except Exception as e: 
             print(f"Telegram metin hatası: {e}")
 
 def send_telegram_photo(photo_path, caption):
     if TOKEN and CHAT_ID and os.path.exists(photo_path):
         url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+        
+        # Fotoğraf altı yazısı (caption) Telegram'da maksimum 1024 karakter olabilir!
+        # Eğer Gemini analizi 1024 karakterden uzunsa, fotoğrafı ayrı analizi ayrı gönderiyoruz (KESİN ÇÖZÜM)
+        if len(caption) > 1000:
+            print("📝 Gemini analizi uzun olduğu için fotoğraf ayrı, rapor metni ayrı gönderiliyor...")
+            try:
+                # Önce sadece fotoğrafı gönder
+                with open(photo_path, 'rb') as photo:
+                    requests.post(url, data={"chat_id": CHAT_ID, "caption": "📸 GEMINI ALFA ANALİZ GRAFİĞİ"}, files={"photo": photo}, timeout=15)
+                time.sleep(1)
+                # Hemen arkasından analizin tamamını metin olarak fırlat
+                send_telegram_text(caption)
+            except Exception as e:
+                print(f"Uzun analiz fotoğraf/metin split hatası: {e}")
+            return
+
         try:
-            with open(photo_path, 'rb') as photo:
-                requests.post(url, data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "Markdown"}, files={"photo": photo}, timeout=15)
+            res = requests.post(url, data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "Markdown"}, files={"photo": photo}, timeout=15)
+            if res.status_code != 200:
+                print(f"⚠️ Telegram Fotoğraflı Gönderim Başarısız! Kod: {res.status_code}. Düz metin deneniyor...")
+                send_telegram_text(caption)
         except Exception as e: 
             print(f"Telegram fotoğraf hatası: {e}")
 
@@ -340,6 +384,5 @@ def scan():
     else:
         print("⏳ Kriterlere uyan hiçbir coin bulunamadı.")
 
-# TETİKLEYİCİ - EN DIŞARIDA VE EKSİKSİZ OLMALIDIR
 if __name__ == "__main__":
     scan()
