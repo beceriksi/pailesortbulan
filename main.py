@@ -93,12 +93,11 @@ def check_volume_divergence(df):
         return "⚠️ *AYI UYUMSUZLUĞU (Düşüş Beklentisi)*"
     return ""
 
-# ASLA ENGELLEMEYEN GÜVENLİ 15M KONTROLÜ
 def check_candle_trigger_15m(symbol):
     try:
         c_15m = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "15m", "limit": "5"})
         if not c_15m or len(c_15m) == 0:
-            return "⏳ 15m veri alınamadı (Normal Analiz)", False
+            return "⏳ 15m veri alınamadı", 0
         
         df_15m = pd.DataFrame(c_15m, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
         o, h, l, c = float(df_15m.iloc[-1]['o']), float(df_15m.iloc[-1]['h']), float(df_15m.iloc[-1]['l']), float(df_15m.iloc[-1]['c'])
@@ -106,14 +105,12 @@ def check_candle_trigger_15m(symbol):
         body = abs(c - o)
         upper_wick = (h - max(o, c)) if h > max(o, c) else 0
         
-        # Ani yön değişimi / Reaksiyon mumu kontrolü
         if c < o or upper_wick > (body * 0.8):
-            return "🚨 *ACİL DURUM: REAKSİYON MUMU GELDİ (15m)*", True
+            return "🚨 *ACİL DURUM: REAKSİYON MUMU GELDİ (15m)*", 1
         else:
-            return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", False
+            return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", 0
     except:
-        # Hata alınsa bile mesajı engelleme, akışı devam ettir
-        return "⏳ 15m Durumu Okunamadı", False
+        return "⏳ 15m Durumu Okunamadı", 0
 
 def get_funding_rate(symbol):
     res = get_data("/api/v5/public/funding-rate", {"instId": symbol})
@@ -133,7 +130,7 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(url)
-            page.wait_for_timeout(3500)
+            page.wait_for_timeout(4000) # Süreyi biraz artırdık garanti olsun
             page.screenshot(path=output_path)
             browser.close()
         return True
@@ -212,7 +209,6 @@ def scan():
         if valid_cryptos and base_coin not in valid_cryptos:
             continue
         
-        # HER COIN KENDİ İÇİNDE BAĞIMSIZ TARANIR, BİRİNİN HATASI DİĞERİNİ ENGELLEMEZ
         try:
             last_p = float(t['last'])
             open_24h = float(t['open24h'])
@@ -248,8 +244,8 @@ def scan():
                     bv, sv, ratio = get_smart_volume(symbol, df_1h)
                     div = check_volume_divergence(df_1h)
                     
-                    # DETAYLI 15M KONTROLÜ - ASLA ENGELLEMEZ
-                    candle_text, is_urgent = check_candle_trigger_15m(symbol)
+                    # 15M KONTROLÜ - Tamamen İzole Sayısal Değer Alıyoruz (0 veya 1)
+                    candle_text, urgent_score = check_candle_trigger_15m(symbol)
                     funding_info = get_funding_rate(symbol)
 
                     if last_p > res_4h and res_4h != 0: 
@@ -266,34 +262,40 @@ def scan():
                     tv_clean = symbol.replace('-SWAP', '').replace('-', '')
                     img_name = f"{symbol}_1h.png"
                     
-                    print(f"📸 {symbol} için grafik çekiliyor...")
-                    if take_tradingview_screenshot(tv_clean, img_name):
-                        text_summary = f"Fiyat: {last_p} | 4H Dir: {res_4h} | 1H Dir: {res_1h} | 15m Durum: {candle_text} | Funding: {funding_info}"
-                        
-                        detected_signals.append({
-                            "symbol": symbol,
-                            "img_path": img_name,
-                            "text_data": text_summary,
-                            "rsi": round(rsi, 1),
-                            "chg": round(chg, 1),
-                            "ratio": ratio,
-                            "div": div,
-                            "note": note,
-                            "candle": candle_text,
-                            "urgent": is_urgent,
-                            "funding": funding_info,
-                            "tv_link": f"https://www.tradingview.com/chart/?symbol=OKX:{tv_clean}.P"
-                        })
+                    # CRITICAL FIX: Fotoğraf çekilemezse bile veriyi sakla ve mesajı ENGELLEME!
+                    has_photo = take_tradingview_screenshot(tv_clean, img_name)
+                    if not has_photo:
+                        img_name = "NO_IMAGE"
+                    
+                    text_summary = f"Fiyat: {last_p} | 4H Dir: {res_4h} | 1H Dir: {res_1h} | 15m Durum: {candle_text} | Funding: {funding_info}"
+                    
+                    detected_signals.append({
+                        "symbol": symbol,
+                        "img_path": img_name,
+                        "text_data": text_summary,
+                        "rsi": round(rsi, 1),
+                        "chg": round(chg, 1),
+                        "ratio": ratio,
+                        "div": div,
+                        "note": note,
+                        "candle": candle_text,
+                        "urgent": urgent_score, # Boolean yerine 0 veya 1 kullanarak sıralama hatasını çözdük
+                        "funding": funding_info,
+                        "tv_link": f"https://www.tradingview.com/chart/?symbol=OKX:{tv_clean}.P"
+                    })
                     time.sleep(0.5)
                     
         except Exception as e:
-            print(f"{symbol} taranırken iç hata yutuldu, akış kesilmedi: {e}")
+            print(f"{symbol} taramasında iç hata pas geçildi: {e}")
             continue
 
     # Telegram ve Yapay Zeka Çıktı Aşaması
     if detected_signals:
-        # Acil durum mumu alanları en üste sırala ama diğerlerini asla silme!
-        detected_signals.sort(key=lambda x: x['urgent'], reverse=True)
+        try:
+            # Sayısal değer üzerinden güvenli sıralama
+            detected_signals.sort(key=lambda x: x['urgent'], reverse=True)
+        except Exception as e:
+            print(f"Sıralama hatası yutuldu: {e}")
 
         header = "🚨 *TEKNİK ALARM VEREN COİNLER* 🚨\n━━━━━━━━━━━━━━━\n"
         list_elements = []
@@ -308,26 +310,37 @@ def scan():
                         f"  ━━━━━━━━━━━━━━━")
             list_elements.append(item_msg)
             
+        # 1. TEMEL MESAJ HER DURUMDA KESİNLİKLE GİDER
         send_telegram_text(header + "\n".join(list_elements))
         
-        print("🤖 Gemini grafikleri analiz ediyor...")
-        ai_report = analyze_charts_with_gemini(detected_signals)
-        
-        if ai_report:
-            selected_photo = None
-            for s in detected_signals:
-                if s['symbol'].split('-')[0] in ai_report:
-                    selected_photo = s['img_path']
-                    break
+        # 2. YAPAY ZEKA VE FOTOĞRAF BLOĞU (BURADAKİ HATALAR ARTIK ÜSTTEKİ MESAJI ENGELLEYEMEZ)
+        try:
+            print("🤖 Gemini grafikleri analiz ediyor...")
+            ai_report = analyze_charts_with_gemini(detected_signals)
             
-            if selected_photo:
-                send_telegram_photo(selected_photo, ai_report)
-            else:
-                send_telegram_text(ai_report)
+            if ai_report:
+                selected_photo = None
+                for s in detected_signals:
+                    if s['img_path'] != "NO_IMAGE" and os.path.exists(s['img_path']):
+                        # Eşleşmeyi daha esnek hale getirdik
+                        if s['symbol'].split('-')[0].upper() in ai_report.upper():
+                            selected_photo = s['img_path']
+                            break
                 
+                if selected_photo:
+                    send_telegram_photo(selected_photo, ai_report)
+                else:
+                    send_telegram_text(ai_report)
+        except Exception as e:
+            print(f"Gemini veya fotoğraf gönderim aşamasında hata: {e}")
+                
+        # Dosya Temizliği
         for s in detected_signals:
-            if os.path.exists(s['img_path']):
-                os.remove(s['img_path'])
+            if s['img_path'] != "NO_IMAGE" and os.path.exists(s['img_path']):
+                try:
+                    os.remove(s['img_path'])
+                except:
+                    pass
 
 if __name__ == "__main__":
     scan()
