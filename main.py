@@ -7,7 +7,7 @@ from google import genai
 from google.genai import types
 from playwright.sync_api import sync_playwright
 
-# ENV / SECRETS (GitHub veya Bilgisayarınızdan Alınır)
+# ENV / SECRETS
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -93,24 +93,27 @@ def check_volume_divergence(df):
         return "⚠️ *AYI UYUMSUZLUĞU (Düşüş Beklentisi)*"
     return ""
 
-# GÜNCELLENEN ACİL DURUM 15 DAKİKALIK MUM KONTROLÜ
+# ASLA ENGELLEMEYEN GÜVENLİ 15M KONTROLÜ
 def check_candle_trigger_15m(symbol):
-    c_15m = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "15m", "limit": "5"})
-    if not c_15m:
-        return "⚠️ 15m veri hatası", False
-    
-    df_15m = pd.DataFrame(c_15m, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
-    last = df_15m.iloc[-1]
-    o, h, l, c = float(last['o']), float(last['h']), float(last['l']), float(last['c'])
-    
-    body = abs(c - o)
-    upper_wick = (h - max(o, c)) if h > max(o, c) else 0
-    
-    # 15 dakikalıkta satıcılar baskınsa (Kırmızı mum VEYA uzun üst iğne)
-    if c < o or upper_wick > (body * 0.8):
-        return "🚨 *ACİL DURUM: REAKSİYON MUMU GELDİ (15m)*", True
-    else:
-        return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", False
+    try:
+        c_15m = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "15m", "limit": "5"})
+        if not c_15m or len(c_15m) == 0:
+            return "⏳ 15m veri alınamadı (Normal Analiz)", False
+        
+        df_15m = pd.DataFrame(c_15m, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
+        o, h, l, c = float(df_15m.iloc[-1]['o']), float(df_15m.iloc[-1]['h']), float(df_15m.iloc[-1]['l']), float(df_15m.iloc[-1]['c'])
+        
+        body = abs(c - o)
+        upper_wick = (h - max(o, c)) if h > max(o, c) else 0
+        
+        # Ani yön değişimi / Reaksiyon mumu kontrolü
+        if c < o or upper_wick > (body * 0.8):
+            return "🚨 *ACİL DURUM: REAKSİYON MUMU GELDİ (15m)*", True
+        else:
+            return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", False
+    except:
+        # Hata alınsa bile mesajı engelleme, akışı devam ettir
+        return "⏳ 15m Durumu Okunamadı", False
 
 def get_funding_rate(symbol):
     res = get_data("/api/v5/public/funding-rate", {"instId": symbol})
@@ -189,7 +192,6 @@ def scan():
     if not tickers: return
 
     underlyings = get_data("/api/v5/public/underlying", {"instType": "SWAP"})
-    
     valid_cryptos = []
     if underlyings and isinstance(underlyings, list):
         for item in underlyings:
@@ -210,6 +212,7 @@ def scan():
         if valid_cryptos and base_coin not in valid_cryptos:
             continue
         
+        # HER COIN KENDİ İÇİNDE BAĞIMSIZ TARANIR, BİRİNİN HATASI DİĞERİNİ ENGELLEMEZ
         try:
             last_p = float(t['last'])
             open_24h = float(t['open24h'])
@@ -245,11 +248,10 @@ def scan():
                     bv, sv, ratio = get_smart_volume(symbol, df_1h)
                     div = check_volume_divergence(df_1h)
                     
-                    # 15 DAKİKALIK DETAYLI ONAY KONTROLÜ
+                    # DETAYLI 15M KONTROLÜ - ASLA ENGELLEMEZ
                     candle_text, is_urgent = check_candle_trigger_15m(symbol)
                     funding_info = get_funding_rate(symbol)
 
-                    # STRATEJİK YORUM MANTIĞI
                     if last_p > res_4h and res_4h != 0: 
                         note = "🔥 *KIRILIM:* 4H Direnç üstü kapanış, tehlikeli!"
                     elif res_1h != 0 and (res_1h - last_p) / last_p < 0.006: 
@@ -278,22 +280,21 @@ def scan():
                             "div": div,
                             "note": note,
                             "candle": candle_text,
-                            "urgent": is_urgent, # Öncelik sıralaması için saklıyoruz
+                            "urgent": is_urgent,
                             "funding": funding_info,
                             "tv_link": f"https://www.tradingview.com/chart/?symbol=OKX:{tv_clean}.P"
                         })
                     time.sleep(0.5)
                     
         except Exception as e:
-            print(f"{symbol} taranırken hata: {e}")
+            print(f"{symbol} taranırken iç hata yutuldu, akış kesilmedi: {e}")
             continue
 
     # Telegram ve Yapay Zeka Çıktı Aşaması
     if detected_signals:
-        # CRITICAL PRO HAMLE: 15m Acil onay alan coinleri listenin EN BAŞINA taşıyoruz
+        # Acil durum mumu alanları en üste sırala ama diğerlerini asla silme!
         detected_signals.sort(key=lambda x: x['urgent'], reverse=True)
 
-        # 1. MESAJ: Telegram listesi
         header = "🚨 *TEKNİK ALARM VEREN COİNLER* 🚨\n━━━━━━━━━━━━━━━\n"
         list_elements = []
         for s in detected_signals:
@@ -309,8 +310,7 @@ def scan():
             
         send_telegram_text(header + "\n".join(list_elements))
         
-        # 2. MESAJ: Gemini Analizi
-        print("🤖 Gemini grafikleri ve anlık 15m verilerini analiz ediyor...")
+        print("🤖 Gemini grafikleri analiz ediyor...")
         ai_report = analyze_charts_with_gemini(detected_signals)
         
         if ai_report:
@@ -325,7 +325,6 @@ def scan():
             else:
                 send_telegram_text(ai_report)
                 
-        # Temizlik
         for s in detected_signals:
             if os.path.exists(s['img_path']):
                 os.remove(s['img_path'])
