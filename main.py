@@ -164,7 +164,6 @@ def find_custom_sr(df, pivot_len=PIVOT_LEN):
            all(highs[i] > highs[i+j] for j in range(1, pivot_len+1)):
             p_highs.append(highs[i])
         
-        # Buradaki sözdizimi hatası tamamen düzeltildi (j in eklendi)
         if all(lows[i] < lows[i-j] for j in range(1, pivot_len+1)) and \
            all(lows[i] < lows[i+j] for j in range(1, pivot_len+1)):
             p_lows.append(lows[i])
@@ -532,4 +531,5 @@ def main():
         
         text_summary = (
             f"24s Değişim: %{coin['chg']:.1f} | 1H RSI: {coin['rsi']:.1f}\n"
-            f"1H Direnç: {coin['res_1h']} | Anlık Fiya
+            f"1H Direnç: {coin['res_1h']} | Anlık Fiyat: {coin['current_price']}\n"
+            f"15m Mum Reaksiyonu: {urgen
