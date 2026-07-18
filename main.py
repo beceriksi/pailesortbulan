@@ -445,7 +445,7 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
 
 
 # =========================================================
-# OREDJİNAL VE TAM OKX PİYASA TARAMA DÖNGÜSÜ (GERİ EKLENDİ)
+# ORİJİNAL VE TAM OKX PİYASA TARAMA DÖNGÜSÜ
 # =========================================================
 def get_market_candidates():
     print("🌐 OKX Borsasındaki aktif vadeli işlem pariteleri taranıyor...")
@@ -456,7 +456,6 @@ def get_market_candidates():
         print("⚠️ Ticker verisi borsa API'sinden çekilemedi.")
         return []
 
-    # Sadece USDT paritelerini işleme alıyoruz
     usdt_swaps = [t for t in tickers if t['instId'].endswith("-USDT-SWAP")]
 
     for t in usdt_swaps:
@@ -466,11 +465,9 @@ def get_market_candidates():
         except:
             continue
 
-        # İlk Hızlı Eleme: Yükseliş sınırını geçmeyen coini pas geç (Performans için)
         if chg24h < CHANGE_24H_LIMIT:
             continue
 
-        # 1 Saatlik Mumları Çekip Detaylı Teknik Kontrol Yapıyoruz
         c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "35"})
         if not c_1h or len(c_1h) < 20:
             continue
@@ -478,7 +475,6 @@ def get_market_candidates():
         df = pd.DataFrame(c_1h, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
         df['c'] = df['c'].astype(float)
         
-        # RSI 14 Hesaplama
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -486,7 +482,6 @@ def get_market_candidates():
         rsi = 100 - (100 / (1 + rs))
         last_rsi = rsi.iloc[-1]
 
-        # EĞER RSI veya Hacim Uyumsuzluğu Kriteri Eşleşiyorsa Listeye Ekle (Gemini Seçsin Diye)
         vol_div = check_volume_divergence(df)
         has_vol_anomaly = vol_div != ""
 
@@ -521,4 +516,14 @@ def main():
     
     candidates = get_market_candidates()
     if not candidates:
-        print("📭 Bu tarama döngüs
+        print("📭 Bu tarama döngüsünde kriterlere uyan aday bulunamadı.")
+        return
+
+    print(f"📊 Toplam {len(candidates)} teknik aday bulundu, detaylar çekiliyor...")
+    signals_data = []
+    
+    for coin in candidates:
+        symbol = coin["symbol"]
+        oi_label, _ = get_oi_trend(symbol)
+        pressure_label, _ = get_net_buying_pressure(symbol)
+        
