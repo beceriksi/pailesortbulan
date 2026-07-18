@@ -235,8 +235,8 @@ def get_oi_trend(symbol):
             return "OI Verisi Alınamadı", 0
 
         oi_now = float(res[0].get('oi', 0))
-        comment = "📈 OI Yüksek (Short İçin Pozitif Birikim)" if oi_now > 100000 else "Dengeli OI"
-        return f"{oi_now:.0f} Kontrat | {comment}", oi_now
+        comment = "Short Pozitif Birikim" if oi_now > 100000 else "Dengeli"
+        return f"{oi_now:.0f} Kontrat ({comment})", oi_now
     except Exception as e:
         print(f"OI hatası ({symbol}): {e}")
         return "OI Verisi Çekilemedi", 0
@@ -258,9 +258,9 @@ def get_net_buying_pressure(symbol):
             net_pressure_pct = ((buy_vol - sell_vol) / total_vol) * 100
             
             if net_pressure_pct > 15:
-                return f"+%{net_pressure_pct:.1f} (🔥 Alıcı Baskın - Dikkat)", net_pressure_pct
+                return f"+%{net_pressure_pct:.1f} (Alıcı Baskın)", net_pressure_pct
             elif net_pressure_pct < -15:
-                return f"%{net_pressure_pct:.1f} (🔻 Satıcı Baskın - Short İçin İyi)", net_pressure_pct
+                return f"%{net_pressure_pct:.1f} (Satıcı Baskın)", net_pressure_pct
             else:
                 return f"%{net_pressure_pct:.1f} (Dengeli)", net_pressure_pct
         
@@ -398,27 +398,28 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         return None
 
     try:
-        # Yeni SDK yapısında istemci başlatılıyor
         client = genai.Client(api_key=GEMINI_API_KEY)
         contents = []
 
+        # STRICT PROMPT: Modelin gereksiz cümle kurmasını tamamen engelledik.
         prompt = f"""
-        Sen üst düzey bir teknik analistsin. Genel piyasa (BTC) trend durumu şu anda: {btc_trend_label}.
-        Sana gönderdiğim bu aday grafiklerini ve teknik metin verilerini multimodal olarak incele.
+        Sen profesyonel bir veri analitiği botusun. Hikaye yazma, uzun paragraflar kurma.
+        Genel BTC Trendi: {btc_trend_label}. 
+        Gelen grafikleri ve metin verilerini incele, SADECE aşağıdaki şablona sadık kalarak, en özet maddeler halinde çıktı üret.
 
-        1. BÖLÜM: TÜM LİSTEYE BAKIŞ
-        Her coin için 1-2 cümlelik net teknik yorum yaz.
-        Format: • **[COIN ADI]**: [yorum]
+        🤖 **GEMINI RAPORU**
+        ──────────────────
+        • **Aday Durumları:**
+        [İncelediğin her parite için sadece 1 kısa cümlelik teknik veri durum özeti, örn: "SOL-USDT: RSI şişkin, dirençte dönüş arıyor."]
 
-        2. BÖLÜM: 👑 GEMINI ALFA SEÇİMİ
-        Kısa vadeli SHORT için EN GÜVENLİ 1 coini seç:
-        🎯 **İşlem Yapılacak Coin:** [COIN ADI]
-        💡 **Neden Bu Grafik?:** [detaylı gerekçe]
-        🛑 **Risk & Stop Yönetimi:** [iptal seviyesi]
+        👑 **ALFA SEÇİMİ (SHORT)**
+        ──────────────────
+        🎯 **Coin:** [Seçilen Parite]
+        💡 **Neden?:** [En önemli 2 teknik sebep, yan yana yazılacak]
+        🛑 **Stop:** [Yapısal direnç seviyesi]
         """
         contents.append(prompt)
 
-        # Görselleri yeni kütüphanenin istediği bytes yapısıyla ekliyoruz (Çözüm burası)
         for item in signals_data:
             if os.path.exists(item['img_path']):
                 with open(item['img_path'], 'rb') as f:
@@ -516,8 +517,9 @@ def main():
 
     signals_data = []
     
-    raw_signals_msg = f"🔍 *PİYASA TARAMA SONUÇLARI (DÜZENLİ LİSTE)*\n"
-    raw_signals_msg += f"🌐 *Piyasa Trendi (BTC):* `{btc_label}`\n"
+    # HAM LİSTE TASARIMI: Blok yapıda, göz yormayacak şekilde sadeleştirildi.
+    raw_signals_msg = f"🔍 *PİYASA TARAMA SONUÇLARI*\n"
+    raw_signals_msg += f"🌐 *BTC:* `{btc_label}`\n"
     raw_signals_msg += f"───────────────────────\n\n"
 
     for coin in candidates:
@@ -533,14 +535,14 @@ def main():
         take_tradingview_screenshot(symbol, img_path) 
         
         text_summary = (
-            f"📈 *24s Değişim:* `%_{coin['chg']:.1f}_` | *1H RSI:* `{coin['rsi']:.1f}`\n"
-            f"🎯 *Fiyat / Direnç:* `{coin['current_price']}` / `{coin['res_1h']}`\n"
-            f"⏱ *15m Reaksiyon:* `{urgent_label}`\n"
-            f"🔄 *Uyumsuzluk (RSI):* `{div_label}`\n"
-            f"📊 *Hacim Anomalisi:* `{coin['vol_anomaly'] if coin['vol_anomaly'] else 'Normal'}`\n"
-            f"💰 *Funding Rate:* `{funding_raw}` {fl_label}\n"
-            f"📊 *Açık Pozisyon (OI):* `{oi_label}`\n"
-            f"🌊 *1H Net Alım Baskısı:* `{pressure_label}`"
+            f"• *%24s:* `%_{coin['chg']:.1f}_` | *RSI:* `{coin['rsi']:.1f}`\n"
+            f"• *Fiyat/Direnç:* `{coin['current_price']}` / `{coin['res_1h']}`\n"
+            f"• *15m Teyit:* `{urgent_label}`\n"
+            f"• *Uyumsuzluk:* `{div_label}`\n"
+            f"• *Hacim:* `{coin['vol_anomaly'] if coin['vol_anomaly'] else 'Normal'}`\n"
+            f"• *Funding:* `{funding_raw}` {fl_label}\n"
+            f"• *OI:* `{oi_label}`\n"
+            f"• *Saf Alım:* `{pressure_label}`"
         )
         
         signals_data.append({
@@ -549,7 +551,7 @@ def main():
             "text_data": text_summary
         })
 
-        raw_signals_msg += f"🚨 *PARİTE: {symbol}*\n{text_summary}\n"
+        raw_signals_msg += f"🚨 *{symbol}*\n{text_summary}\n"
         raw_signals_msg += f"───────────────────────\n\n"
 
         log_signal({
@@ -559,12 +561,10 @@ def main():
             'ratio': 0, 'btc_trend_label': btc_label
         })
 
-    # 1. Ham listeyi Telegram'a gönder
     print("📤 Düzenli ham sinyal listesi Telegram'a iletiliyor...")
     send_telegram_text(raw_signals_msg)
     time.sleep(1)
 
-    # 2. Gemini analiz raporunu hazırla ve gönder
     if signals_data:
         print("🤖 Multimodal Gemini analiz raporu hazırlanıyor...")
         report = analyze_charts_with_gemini(signals_data, btc_label)
@@ -574,7 +574,7 @@ def main():
             else:
                 send_telegram_text(report)
         else:
-            fallback_msg = "⚠️ Gemini Raporu Üretilemedi. Ham veriler üstteki mesaj kutusundadır."
+            fallback_msg = "⚠️ Gemini Raporu Üretilemedi."
             send_telegram_text(fallback_msg)
             
     print("🏁 Tarama döngüsü başarıyla tamamlandı.")
