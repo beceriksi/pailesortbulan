@@ -532,4 +532,57 @@ def main():
         text_summary = (
             f"24s Değişim: %{coin['chg']:.1f} | 1H RSI: {coin['rsi']:.1f}\n"
             f"1H Direnç: {coin['res_1h']} | Anlık Fiyat: {coin['current_price']}\n"
-            f"15m Mum Reaksiyonu: {urgen
+            f"15m Mum Reaksiyonu: {urgent_label}\n"
+            f"RSI Uyumsuzluğu: {div_label}\n"
+            f"Hacim Uyumsuzluğu: {coin['vol_anomaly']}\n"
+            f"Funding Rate: {funding_raw} {fl_label}\n"
+            f"Açık Pozisyonlar (OI): {oi_label}\n"
+            f"Saf Alım Baskısı (1H CVD): {pressure_label}"
+        )
+        signals_data.append({
+            "symbol": symbol,
+            "img_path": img_path,
+            "text_data": text_summary
+        })
+
+        log_signal({
+            'symbol': symbol, 'entry_price': coin['current_price'], 'rsi': coin['rsi'],
+            'chg': coin['chg'], 'res_4h': 0, 'res_1h': coin['res_1h'], 'urgent': confirm_count,
+            'has_divergence': str(has_div), 'funding_raw': funding_raw, 'oi_trend_raw': oi_label,
+            'ratio': 0, 'btc_trend_label': btc_label
+        })
+
+    if signals_data:
+        print("🤖 Multimodal Gemini analiz raporu hazırlanıyor...")
+        report = analyze_charts_with_gemini(signals_data, btc_label)
+        if report:
+            if os.path.exists(signals_data[0]["img_path"]):
+                send_telegram_photo(signals_data[0]["img_path"], report)
+            else:
+                send_telegram_text(report)
+        else:
+            fallback_msg = "⚠️ Gemini Raporu Üretilemedi. Ham Aday Verisi:\n\n" + signals_data[0]["text_data"]
+            send_telegram_text(fallback_msg)
+            
+    print("🏁 Tarama döngüsü başarıyla tamamlandı. GitHub Actions kapatılıyor.")
+
+def log_signal(s):
+    file_exists = os.path.exists(LOG_FILE)
+    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow([
+                "timestamp_utc", "symbol", "entry_price", "rsi", "chg24h",
+                "res_4h", "res_1h", "candle_confirmations", "divergence",
+                "funding", "oi_trend", "vol_ratio", "btc_trend",
+                "outcome", "outcome_pct", "resolved"
+            ])
+        writer.writerow([
+            datetime.now(timezone.utc).isoformat(), s['symbol'], s['entry_price'],
+            s['rsi'], s['chg'], s['res_4h'], s['res_1h'], s['urgent'],
+            s['has_divergence'], s['funding_raw'], s['oi_trend_raw'], s['ratio'],
+            s['btc_trend_label'], "", "", "FALSE"
+        ])
+
+if __name__ == "__main__":
+    main()
