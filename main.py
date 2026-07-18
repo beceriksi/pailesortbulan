@@ -205,7 +205,7 @@ def check_candle_trigger_15m(symbol):
         if confirmations >= 2:
             return f"🚨 *ACİL DURUM: REAKSİYON TEYİTLİ ({confirmations}/3)*", confirmations
         elif confirmations == 1:
-            return "⚠️ 15m'de zayıf reaksiyon belirtisi (tek teyit, henüz güvenilir değil)", 0
+            return "⚠️ 15m'de zayıf reaksiyon belirtisi (tek teyit, henüz güvenilir değil)", 1
         else:
             return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", 0
     except Exception as e:
@@ -227,12 +227,9 @@ def get_funding_rate(symbol):
 
 
 # =========================================================
-# GÜNCELLENEN VE YENİ EKLENEN İLERİ DÜZEY ANALİZ MODÜLLERİ
+# YENİ VE İLERİ DÜZEY DATA UÇ NOKTALARI (OI & CVD MANTIĞI)
 # =========================================================
 def get_oi_trend(symbol):
-    """
-    OKX Kamu API'sinden kesin ve kararlı anlık Open Interest verisini çeker.
-    """
     try:
         if not symbol.endswith("-SWAP"):
             inst_id = f"{symbol.split('-')[0]}-USDT-SWAP"
@@ -251,9 +248,6 @@ def get_oi_trend(symbol):
 
 
 def get_net_buying_pressure(symbol):
-    """
-    Market emirleriyle (Taker) yapılan net alım/satım baskısını (CVD mantığı) hesaplar.
-    """
     try:
         if not symbol.endswith("-SWAP"):
             inst_id = f"{symbol.split('-')[0]}-USDT-SWAP"
@@ -286,7 +280,7 @@ def get_net_buying_pressure(symbol):
 
 
 # =========================================================
-# SİNYAL DURUM VE GÜNCELLEME (LOG / PERFORMANCE)
+# SİNYAL TAKİP VE GÜNCELLEME SİSTEMİ
 # =========================================================
 def check_signal_status(symbol, entry_price, entry_rsi, res_1h):
     try:
@@ -323,9 +317,6 @@ def check_signal_status(symbol, entry_price, entry_rsi, res_1h):
 
 
 def update_open_signals():
-    """
-    Açık olan sinyallerin durumunu günceller. Yazım hatası ve zaman uyumsuzlukları düzeltildi.
-    """
     print("⏳ Mevcut açık sinyaller kontrol ediliyor...")
     if not os.path.exists(LOG_FILE):
         return
@@ -364,27 +355,19 @@ def update_open_signals():
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
                 df.at[idx, "resolved"] = "TRUE"
                 updated = True
-                notify_msgs.append(
-                    f"🔁 *SİNYAL GEÇERSİZ (YAPI KIRILDI):* {symbol} 1H direnç seviyesinin "
-                    f"üzerinde kapandı (%{pct_move:.1f}). Short tezi geçersiz."
-                )
+                notify_msgs.append(f"🔁 *SİNYAL GEÇERSİZ (YAPI KIRILDI):* {symbol} 1H direnç seviyesinin üzerinde kapandı (%{pct_move:.1f}). Short tezi geçersiz.")
             elif status == "INVALIDATE_MOMENTUM":
                 df.at[idx, "outcome"] = "BASARISIZ (momentum geri geldi)"
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
                 df.at[idx, "resolved"] = "TRUE"
                 updated = True
-                notify_msgs.append(
-                    f"📉 *SİNYAL GEÇERSİZ (MOMENTUM DÖNDÜ):* {symbol} için aşırı alım bölgesi "
-                    f"tükenmedi, RSI yükseliyor (%{pct_move:.1f})."
-                )
+                notify_msgs.append(f"📉 *SİNYAL GEÇERSİZ (MOMENTUM DÖNDÜ):* {symbol} için aşırı alım bölgesi tükenmedi, RSI yükseliyor (%{pct_move:.1f}).")
             elif status == "SUCCESS":
                 df.at[idx, "outcome"] = "BAŞARILI (hedef yakalandı)"
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
                 df.at[idx, "resolved"] = "TRUE"
                 updated = True
-                notify_msgs.append(
-                    f"💰 *SİNYAL BAŞARILI:* {symbol} beklendiği gibi dirençten çöktü! Hareket: %{pct_move:.1f}"
-                )
+                notify_msgs.append(f"💰 *SİNYAL BAŞARILI:* {symbol} beklendiği gibi dirençten çöktü! Hareket: %{pct_move:.1f}")
             elif hours_passed > MAX_PENDING_HOURS:
                 df.at[idx, "outcome"] = "ZAMAN ASIMI"
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
@@ -461,10 +444,66 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         return None
 
 
+# =========================================================
+# OREDJİNAL VE TAM OKX PİYASA TARAMA DÖNGÜSÜ (GERİ EKLENDİ)
+# =========================================================
 def get_market_candidates():
-    # Mevcut tarama mekanizmandan gelen aday listesi simülasyonu
-    # Kendi özgün tarama mantığını buraya entegre edebilirsin.
-    return []
+    print("🌐 OKX Borsasındaki aktif vadeli işlem pariteleri taranıyor...")
+    tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
+    candidates = []
+
+    if not tickers:
+        print("⚠️ Ticker verisi borsa API'sinden çekilemedi.")
+        return []
+
+    # Sadece USDT paritelerini işleme alıyoruz
+    usdt_swaps = [t for t in tickers if t['instId'].endswith("-USDT-SWAP")]
+
+    for t in usdt_swaps:
+        symbol = t['instId']
+        try:
+            chg24h = ((float(t['last']) / float(t['open24h'])) - 1) * 100
+        except:
+            continue
+
+        # İlk Hızlı Eleme: Yükseliş sınırını geçmeyen coini pas geç (Performans için)
+        if chg24h < CHANGE_24H_LIMIT:
+            continue
+
+        # 1 Saatlik Mumları Çekip Detaylı Teknik Kontrol Yapıyoruz
+        c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "35"})
+        if not c_1h or len(c_1h) < 20:
+            continue
+
+        df = pd.DataFrame(c_1h, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
+        df['c'] = df['c'].astype(float)
+        
+        # RSI 14 Hesaplama
+        delta = df['c'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss.replace(0, 0.0001)
+        rsi = 100 - (100 / (1 + rs))
+        last_rsi = rsi.iloc[-1]
+
+        # EĞER RSI veya Hacim Uyumsuzluğu Kriteri Eşleşiyorsa Listeye Ekle (Gemini Seçsin Diye)
+        vol_div = check_volume_divergence(df)
+        has_vol_anomaly = vol_div != ""
+
+        if last_rsi >= RSI_LIMIT or has_vol_anomaly:
+            p_highs, p_lows = find_custom_sr(df)
+            res_1h = p_highs[-1] if p_highs else (df['h'].astype(float).max())
+
+            candidates.append({
+                "symbol": symbol,
+                "current_price": float(t['last']),
+                "chg": chg24h,
+                "rsi": last_rsi,
+                "res_1h": res_1h,
+                "vol_anomaly": vol_div
+            })
+            
+    return candidates
 
 
 # =========================================================
@@ -473,42 +512,13 @@ def get_market_candidates():
 def main():
     print(f"🚀 Gem Hunter Botu Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
     
-    # 1. Aşama: Açık pozisyon takibini güncelle
+    # 1. Aşama: Açık pozisyon takip kayıtlarını güncelle
     update_open_signals()
     
-    # 2. Aşama: Trend kontrolü ve tarama
+    # 2. Aşama: Genel Market Analizi
     btc_label, btc_score = get_btc_trend()
     print(f"ℹ️ Mevcut BTC Trendi: {btc_label}")
     
     candidates = get_market_candidates()
     if not candidates:
-        print("📭 Bu tarama döngüsünde kriterlere uyan aday bulunamadı.")
-        return
-
-    signals_data = []
-    for coin in candidates:
-        symbol = coin["symbol"]
-        oi_label, _ = get_oi_trend(symbol)
-        pressure_label, _ = get_net_buying_pressure(symbol)
-        
-        print(f"-> Aday İnceleniyor: {symbol} | {oi_label} | {pressure_label}")
-        
-        img_path = f"{symbol}_chart.png"
-        if take_tradingview_screenshot(symbol, img_path):
-            text_summary = f"OI Durumu: {oi_label}\nSaf Alım Baskısı: {pressure_label}"
-            signals_data.append({
-                "symbol": symbol,
-                "img_path": img_path,
-                "text_data": text_summary
-            })
-
-    if signals_data:
-        report = analyze_charts_with_gemini(signals_data, btc_label)
-        if report:
-            # En son üretilen Alfa raporu ilk sıradaki grafik görseliyle Telegram'a basılır
-            send_telegram_photo(signals_data[0]["img_path"], report)
-            
-    print("🏁 Tarama döngüsü başarıyla tamamlandı. GitHub Actions kapatılıyor.")
-
-if __name__ == "__main__":
-    main()
+        print("📭 Bu tarama döngüs
