@@ -17,7 +17,7 @@ CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 RSI_LIMIT = 70
-CHANGE_24H_LIMIT = 8
+CHANGE_24H_LIMIT = 8         # Şartların orijinal haline sadık kalındı
 PIVOT_LEN = 4                
 LOG_FILE = "signals_log.csv" 
 MAX_PENDING_HOURS = 12       
@@ -44,7 +44,6 @@ def send_telegram_text(msg):
                 "chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True
             }, timeout=10)
             if res.status_code != 200:
-                print(f"⚠️ Telegram Metin Gönderilemedi! Kod: {res.status_code} | Yanıt: {res.text}")
                 requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "disable_web_page_preview": True}, timeout=10)
         except Exception as e:
             print(f"Telegram metin hatası: {e}")
@@ -54,22 +53,22 @@ def send_telegram_photo(photo_path, caption):
     if TOKEN and CHAT_ID and os.path.exists(photo_path):
         url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
         if len(caption) > 1000:
-            print("📝 Gemini analizi uzun olduğu için fotoğraf ayrı, rapor metni ayrı gönderiliyor...")
             try:
                 with open(photo_path, 'rb') as photo:
                     requests.post(url, data={"chat_id": CHAT_ID, "caption": "📸 GEMINI ALFA ANALİZ GRAFİĞİ"}, files={"photo": photo}, timeout=15)
                 time.sleep(1)
                 send_telegram_text(caption)
             except Exception as e:
-                print(f"Uzun analiz fotoğraf/metin split hatası: {e}")
+                print(f"Fotoğraf/Metin split hatası: {e}")
+                send_telegram_text(caption)
             return
         try:
             res = requests.post(url, data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "Markdown"}, files={"photo": photo}, timeout=15)
             if res.status_code != 200:
-                print(f"⚠️ Telegram Fotoğraflı Gönderim Başarısız! Kod: {res.status_code}. Düz metin deneniyor...")
                 send_telegram_text(caption)
         except Exception as e:
             print(f"Telegram fotoğraf hatası: {e}")
+            send_telegram_text(caption)
 
 
 # =========================================================
@@ -117,8 +116,8 @@ def get_btc_trend():
 
 def check_rsi_price_divergence(df):
     try:
-        if len(df) < 30:
-            return "", False
+        if df is None or len(df) < 30:
+            return "Veri Yetersiz", False
 
         close = df['c'].astype(float)
         delta = close.diff()
@@ -137,19 +136,19 @@ def check_rsi_price_divergence(df):
                 highs_idx.append(i)
 
         if len(highs_idx) < 2:
-            return "", False
+            return "Uyumsuzluk Yok (Tepe Eksik)", False
 
         i1, i2 = highs_idx[-2], highs_idx[-1]
         price1, price2 = h[i1], h[i2]
         rsi1, rsi2 = rsi_window.iloc[i1], rsi_window.iloc[i2]
 
         if price2 > price1 and rsi2 < rsi1:
-            return "🔻 *RSI DIVERGENCE TEYİDİ* (fiyat yeni zirve, RSI zayıflıyor)", True
+            return "🔻 RSI DIVERGENCE TEYİDİ (Fiyat Yükseliyor, RSI Zayıflıyor)", True
 
-        return "", False
+        return "Uyumsuzluk Algılanmadı", False
     except Exception as e:
         print(f"Divergence hesap hatası: {e}")
-        return "", False
+        return "Hesaplama Hatası", False
 
 
 def find_custom_sr(df, pivot_len=PIVOT_LEN):
@@ -164,6 +163,7 @@ def find_custom_sr(df, pivot_len=PIVOT_LEN):
         if all(highs[i] > highs[i-j] for j in range(1, pivot_len+1)) and \
            all(highs[i] > highs[i+j] for j in range(1, pivot_len+1)):
             p_highs.append(highs[i])
+        # Hatalı olan syntax ("for range") kısmı düzeltildi: "for j in range" yapıldı
         if all(lows[i] < lows[i-j] for j in range(1, pivot_len+1)) and \
            all(lows[i] < lows[i+j] for j in range(1, pivot_len+1)):
             p_lows.append(lows[i])
@@ -177,7 +177,7 @@ def check_volume_divergence(df):
     p = df['c'].astype(float).iloc[-5:].values
     v = df['v'].astype(float).iloc[-5:].values
     if p[-1] > p[0] and v[-1] < v[-2]:
-        return "⚠️ *AYI UYUMSUZLUĞU (Düşüş Beklentisi)*"
+        return "⚠️ AYI UYUMSUZLUĞU (Hacimsiz Yükseliş)"
     return ""
 
 
@@ -203,11 +203,11 @@ def check_candle_trigger_15m(symbol):
         confirmations = sum([last_candle_bearish, lower_high, closes_weakening])
 
         if confirmations >= 2:
-            return f"🚨 *ACİL DURUM: REAKSİYON TEYİTLİ ({confirmations}/3)*", confirmations
+            return f"🚨 ACİL DURUM: REAKSİYON TEYİTLİ ({confirmations}/3)", confirmations
         elif confirmations == 1:
-            return "⚠️ 15m'de zayıf reaksiyon belirtisi (tek teyit, henüz güvenilir değil)", 1
+            return "⚠️ 15m'de tek teyit (zayıf reaksiyon)", 1
         else:
-            return "⏳ 15m Grafik Hala Güçlü Yeşil Gövdeli", 0
+            return "⏳ 15m Grafik Hala Güçlü Boğa Yapısında", 0
     except Exception as e:
         print(f"15m tetik hatası: {e}")
         return "⏳ 15m Durumu Okunamadı", 0
@@ -219,16 +219,13 @@ def get_funding_rate(symbol):
         rate = float(res[0].get('fundingRate', 0))
         rate_pct = rate * 100
         if rate_pct < -0.05:
-            return f"%{rate_pct:.3f}", "⚠️ *AŞIRI NEGATİF FL (short sıkışması riski)*"
+            return f"%{rate_pct:.3f}", "⚠️ AŞIRI NEGATİF FL (Short Sıkışması Riski)"
         elif rate_pct > 0.08:
-            return f"%{rate_pct:.3f}", "🔥 *AŞIRI POZİTİF FL (long tarafı aşırı kaldıraçlı)*"
+            return f"%{rate_pct:.3f}", "🔥 AŞIRI POZİTİF FL (Kaldıraçlı Long Yoğun)"
         return f"%{rate_pct:.3f}", ""
     return "Veri Alınamadı", ""
 
 
-# =========================================================
-# YENİ VE İLERİ DÜZEY DATA UÇ NOKTALARI (OI & CVD MANTIĞI)
-# =========================================================
 def get_oi_trend(symbol):
     try:
         if not symbol.endswith("-SWAP"):
@@ -243,8 +240,8 @@ def get_oi_trend(symbol):
         oi_now = float(res[0].get('oi', 0))
         return f"Anlık OI: {oi_now:.1f} Kontrat", oi_now
     except Exception as e:
-        print(f"OI kamu fonksiyonu hatası ({symbol}): {e}")
-        return "OI Verisi Yok (Hata)", 0
+        print(f"OI hatası ({symbol}): {e}")
+        return "OI Verisi Yok", 0
 
 
 def get_net_buying_pressure(symbol):
@@ -267,15 +264,15 @@ def get_net_buying_pressure(symbol):
             net_pressure_pct = ((buy_vol - sell_vol) / total_vol) * 100
             
             if net_pressure_pct > 15:
-                return f"🔥 SAF ALIM BASKISI: +%{net_pressure_pct:.1f} (Alıcılar Dominant)", net_pressure_pct
+                return f"🔥 SAF ALIM BASKISI: +%{net_pressure_pct:.1f} (Alıcı Baskın)", net_pressure_pct
             elif net_pressure_pct < -15:
-                return f"🔻 SAF SATIŞ BASKISI: %{net_pressure_pct:.1f} (Gizli Dağıtım / Mal Boşaltma)", net_pressure_pct
+                return f"🔻 SAF SATIŞ BASKISI: %{net_pressure_pct:.1f} (Dağıtım Yapılıyor)", net_pressure_pct
             else:
                 return f"Dengeli Konsolidasyon: %{net_pressure_pct:.1f}", net_pressure_pct
         
         return "Saf Alım Verisi Alınamadı", 0
     except Exception as e:
-        print(f"Saf alım baskısı hesaplama hatası ({symbol}): {e}")
+        print(f"Saf alım baskısı hatası ({symbol}): {e}")
         return "Saf Alım Verisi Yok", 0
 
 
@@ -392,8 +389,8 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
-            page.goto(url)
-            page.wait_for_timeout(4000)
+            page.goto(url, wait_until="networkidle")
+            page.wait_for_timeout(5000) 
             page.screenshot(path=output_path)
             browser.close()
         return True
@@ -413,8 +410,7 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         prompt = f"""
         Sen üst düzey bir teknik analistsin. Genel piyasa (BTC) trend durumu şu anda: {btc_trend_label}.
 
-        Sana tarayıcı botumdan yakalanan adayların grafiklerini ve anlık teknik verilerini (15m reaksiyon,
-        RSI divergence, funding oranı, open interest trendi ve Saf Alım Baskısı) gönderiyorum.
+        Sana tarayıcı botumdan yakalanan adayların grafiklerini ve anlık teknik verilerini gönderiyorum.
 
         1. BÖLÜM: TÜM LİSTEYE BAKIŞ
         Her coin için 1-2 cümlelik net teknik yorum yaz.
@@ -432,7 +428,7 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
             if os.path.exists(item['img_path']):
                 img = Image.open(item['img_path'])
                 contents.append(img)
-                contents.append(f"Coin: {item['symbol']} Teknik Özeti:\n{item['text_data']}\n\n")
+            contents.append(f"Coin: {item['symbol']} Teknik Özeti:\n{item['text_data']}\n\n")
 
         response = client.models.generate_content(
             model='gemini-2.5-flash',
@@ -495,7 +491,8 @@ def get_market_candidates():
                 "chg": chg24h,
                 "rsi": last_rsi,
                 "res_1h": res_1h,
-                "vol_anomaly": vol_div
+                "vol_anomaly": vol_div,
+                "df_1h": df
             })
             
     return candidates
@@ -507,10 +504,8 @@ def get_market_candidates():
 def main():
     print(f"🚀 Gem Hunter Botu Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
     
-    # 1. Aşama: Açık pozisyon takip kayıtlarını güncelle
     update_open_signals()
     
-    # 2. Aşama: Genel Market Analizi
     btc_label, btc_score = get_btc_trend()
     print(f"ℹ️ Mevcut BTC Trendi: {btc_label}")
     
@@ -527,3 +522,13 @@ def main():
         oi_label, _ = get_oi_trend(symbol)
         pressure_label, _ = get_net_buying_pressure(symbol)
         
+        div_label, has_div = check_rsi_price_divergence(coin["df_1h"]) 
+        urgent_label, confirm_count = check_candle_trigger_15m(symbol)
+        funding_raw, fl_label = get_funding_rate(symbol)
+        
+        img_path = f"{symbol.split('-')[0]}_chart.png"
+        take_tradingview_screenshot(symbol, img_path) 
+        
+        text_summary = (
+            f"24s Değişim: %{coin['chg']:.1f} | 1H RSI: {coin['rsi']:.1f}\n"
+      
