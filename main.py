@@ -136,16 +136,16 @@ def check_rsi_price_divergence(df):
                 highs_idx.append(i)
 
         if len(highs_idx) < 2:
-            return "Uyumsuzluk Yok (Tepe Eksik)", False
+            return "Uyumsuzluk Yok", False
 
         i1, i2 = highs_idx[-2], highs_idx[-1]
         price1, price2 = h[i1], h[i2]
         rsi1, rsi2 = rsi_window.iloc[i1], rsi_window.iloc[i2]
 
         if price2 > price1 and rsi2 < rsi1:
-            return "🔻 RSI DIVERGENCE TEYİDİ (Fiyat Yükseliyor, RSI Zayıflıyor)", True
+            return "🔻 RSI AYI UYUMSUZLUĞU", True
 
-        return "Uyumsuzluk Algılanmadı", False
+        return "Uyumsuzluk Yok", False
     except Exception as e:
         print(f"Divergence hesap hatası: {e}")
         return "Hesaplama Hatası", False
@@ -177,7 +177,7 @@ def check_volume_divergence(df):
     p = df['c'].astype(float).iloc[-5:].values
     v = df['v'].astype(float).iloc[-5:].values
     if p[-1] > p[0] and v[-1] < v[-2]:
-        return "⚠️ AYI UYUMSUZLUĞU (Hacimsiz Yükseliş)"
+        return "⚠️ Hacimsiz Yükseliş (Zayıf Trend)"
     return ""
 
 
@@ -185,7 +185,7 @@ def check_candle_trigger_15m(symbol):
     try:
         c_15m = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "15m", "limit": "6"})
         if not c_15m or len(c_15m) < 4:
-            return "⏳ 15m veri alınamadı", 0
+            return "Veri Alınamadı", 0
 
         df_15m = pd.DataFrame(c_15m, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
         df_15m[['o', 'h', 'l', 'c']] = df_15m[['o', 'h', 'l', 'c']].astype(float)
@@ -205,12 +205,12 @@ def check_candle_trigger_15m(symbol):
         if confirmations >= 2:
             return f"🚨 ACİL DURUM: REAKSİYON TEYİTLİ ({confirmations}/3)", confirmations
         elif confirmations == 1:
-            return "⚠️ 15m'de tek teyit (zayıf reaksiyon)", 1
+            return "⚠️ Tek Teyit (Zayıf Reaksiyon)", 1
         else:
-            return "⏳ 15m Grafik Hala Güçlü Boğa Yapısında", 0
+            return "⏳ Grafik Güçlü (Dönüş Yok)", 0
     except Exception as e:
         print(f"15m tetik hatası: {e}")
-        return "⏳ 15m Durumu Okunamadı", 0
+        return "Durum Okunamadı", 0
 
 
 def get_funding_rate(symbol):
@@ -219,7 +219,7 @@ def get_funding_rate(symbol):
         rate = float(res[0].get('fundingRate', 0))
         rate_pct = rate * 100
         if rate_pct < -0.05:
-            return f"%{rate_pct:.3f}", "⚠️ AŞIRI NEGATİF FL (Short Sıkışması Riski)"
+            return f"%{rate_pct:.3f}", "⚠️ AŞIRI NEGATİF FL (Short Riski)"
         elif rate_pct > 0.08:
             return f"%{rate_pct:.3f}", "🔥 AŞIRI POZİTİF FL (Kaldıraçlı Long Yoğun)"
         return f"%{rate_pct:.3f}", ""
@@ -228,29 +228,23 @@ def get_funding_rate(symbol):
 
 def get_oi_trend(symbol):
     try:
-        if not symbol.endswith("-SWAP"):
-            inst_id = f"{symbol.split('-')[0]}-USDT-SWAP"
-        else:
-            inst_id = symbol
-
+        inst_id = symbol if "-SWAP" in symbol else f"{symbol.split('-')[0]}-USDT-SWAP"
         res = get_data("/api/v5/public/open-interest", {"instId": inst_id})
+        
         if not res or len(res) == 0:
             return "OI Verisi Alınamadı", 0
 
         oi_now = float(res[0].get('oi', 0))
-        return f"Anlık OI: {oi_now:.1f} Kontrat", oi_now
+        comment = "📈 OI Yüksek (Short İçin Pozitif Birikim)" if oi_now > 100000 else "Dengeli OI"
+        return f"{oi_now:.0f} Kontrat | {comment}", oi_now
     except Exception as e:
         print(f"OI hatası ({symbol}): {e}")
-        return "OI Verisi Yok", 0
+        return "OI Verisi Çekilemedi", 0
 
 
 def get_net_buying_pressure(symbol):
     try:
-        if not symbol.endswith("-SWAP"):
-            inst_id = f"{symbol.split('-')[0]}-USDT-SWAP"
-        else:
-            inst_id = symbol
-
+        inst_id = symbol if "-SWAP" in symbol else f"{symbol.split('-')[0]}-USDT-SWAP"
         res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": inst_id, "period": "1H"})
         
         if res and len(res) > 0:
@@ -264,16 +258,16 @@ def get_net_buying_pressure(symbol):
             net_pressure_pct = ((buy_vol - sell_vol) / total_vol) * 100
             
             if net_pressure_pct > 15:
-                return f"🔥 SAF ALIM BASKISI: +%{net_pressure_pct:.1f} (Alıcı Baskın)", net_pressure_pct
+                return f"+%{net_pressure_pct:.1f} (🔥 Alıcı Baskın - Dikkat)", net_pressure_pct
             elif net_pressure_pct < -15:
-                return f"🔻 SAF SATIŞ BASKISI: %{net_pressure_pct:.1f} (Dağıtım Yapılıyor)", net_pressure_pct
+                return f"%{net_pressure_pct:.1f} (🔻 Satıcı Baskın - Short İçin İyi)", net_pressure_pct
             else:
-                return f"Dengeli Konsolidasyon: %{net_pressure_pct:.1f}", net_pressure_pct
+                return f"%{net_pressure_pct:.1f} (Dengeli)", net_pressure_pct
         
-        return "Saf Alım Verisi Alınamadı", 0
+        return "Veri Yok", 0
     except Exception as e:
         print(f"Saf alım baskısı hatası ({symbol}): {e}")
-        return "Saf Alım Verisi Yok", 0
+        return "Veri Yok", 0
 
 
 # =========================================================
@@ -404,13 +398,13 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         return None
 
     try:
+        # Yeni SDK yapısında istemci başlatılıyor
         client = genai.Client(api_key=GEMINI_API_KEY)
         contents = []
 
         prompt = f"""
         Sen üst düzey bir teknik analistsin. Genel piyasa (BTC) trend durumu şu anda: {btc_trend_label}.
-
-        Sana tarayıcı botumdan yakalanan adayların grafiklerini ve anlık teknik verilerini gönderiyorum.
+        Sana gönderdiğim bu aday grafiklerini ve teknik metin verilerini multimodal olarak incele.
 
         1. BÖLÜM: TÜM LİSTEYE BAKIŞ
         Her coin için 1-2 cümlelik net teknik yorum yaz.
@@ -424,10 +418,17 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         """
         contents.append(prompt)
 
+        # Görselleri yeni kütüphanenin istediği bytes yapısıyla ekliyoruz (Çözüm burası)
         for item in signals_data:
             if os.path.exists(item['img_path']):
-                img = Image.open(item['img_path'])
-                contents.append(img)
+                with open(item['img_path'], 'rb') as f:
+                    img_bytes = f.read()
+                contents.append(
+                    types.Part.from_bytes(
+                        data=img_bytes,
+                        mime_type='image/png'
+                    )
+                )
             contents.append(f"Coin: {item['symbol']} Teknik Özeti:\n{item['text_data']}\n\n")
 
         response = client.models.generate_content(
@@ -436,7 +437,7 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         )
         return response.text
     except Exception as e:
-        print(f"Gemini analiz hatası: {e}")
+        print(f"Gemini multimodal analiz hatası: {e}")
         return None
 
 
@@ -507,20 +508,17 @@ def main():
     update_open_signals()
     
     btc_label, btc_score = get_btc_trend()
-    print(f"ℹ️ Mevcut BTC Trendi: {btc_label}")
     
     candidates = get_market_candidates()
     if not candidates:
         print("📭 Bu tarama döngüsünde kriterlere uyan aday bulunamadı.")
         return
 
-    print(f"📊 Toplam {len(candidates)} teknik aday bulundu, detaylar çekiliyor...")
     signals_data = []
     
-    # Telegram'a gidecek ham adaylar mesaj metni başlangıcı
-    raw_signals_msg = f"🔍 *PİYASA TARAMA SONUÇLARI (HAM BİLGİLER)*\n"
-    raw_signals_msg += f"Piyasa Genel Trendi (BTC): #{btc_label}\n"
-    raw_signals_msg += f"----------------------------------------\n\n"
+    raw_signals_msg = f"🔍 *PİYASA TARAMA SONUÇLARI (DÜZENLİ LİSTE)*\n"
+    raw_signals_msg += f"🌐 *Piyasa Trendi (BTC):* `{btc_label}`\n"
+    raw_signals_msg += f"───────────────────────\n\n"
 
     for coin in candidates:
         symbol = coin["symbol"]
@@ -535,23 +533,24 @@ def main():
         take_tradingview_screenshot(symbol, img_path) 
         
         text_summary = (
-            f"24s Değişim: %{coin['chg']:.1f} | 1H RSI: {coin['rsi']:.1f}\n"
-            f"1H Direnç: {coin['res_1h']} | Anlık Fiyat: {coin['current_price']}\n"
-            f"15m Mum Reaksiyonu: {urgent_label}\n"
-            f"RSI Uyumsuzluğu: {div_label}\n"
-            f"Hacim Uyumsuzluğu: {coin['vol_anomaly']}\n"
-            f"Funding Rate: {funding_raw} {fl_label}\n"
-            f"Açık Pozisyonlar (OI): {oi_label}\n"
-            f"Saf Alım Baskısı (1H CVD): {pressure_label}"
+            f"📈 *24s Değişim:* `%_{coin['chg']:.1f}_` | *1H RSI:* `{coin['rsi']:.1f}`\n"
+            f"🎯 *Fiyat / Direnç:* `{coin['current_price']}` / `{coin['res_1h']}`\n"
+            f"⏱ *15m Reaksiyon:* `{urgent_label}`\n"
+            f"🔄 *Uyumsuzluk (RSI):* `{div_label}`\n"
+            f"📊 *Hacim Anomalisi:* `{coin['vol_anomaly'] if coin['vol_anomaly'] else 'Normal'}`\n"
+            f"💰 *Funding Rate:* `{funding_raw}` {fl_label}\n"
+            f"📊 *Açık Pozisyon (OI):* `{oi_label}`\n"
+            f"🌊 *1H Net Alım Baskısı:* `{pressure_label}`"
         )
+        
         signals_data.append({
             "symbol": symbol,
             "img_path": img_path,
             "text_data": text_summary
         })
 
-        # Ham verileri Telegram mesaj metnine ekle
-        raw_signals_msg += f"🚨 *{symbol}*\n{text_summary}\n\n"
+        raw_signals_msg += f"🚨 *PARİTE: {symbol}*\n{text_summary}\n"
+        raw_signals_msg += f"───────────────────────\n\n"
 
         log_signal({
             'symbol': symbol, 'entry_price': coin['current_price'], 'rsi': coin['rsi'],
@@ -560,12 +559,12 @@ def main():
             'ratio': 0, 'btc_trend_label': btc_label
         })
 
-    # 1. ADIM: Önce yakalanan tüm ham sinyalleri Telegram'a raporla
-    print("📤 Ham sinyal listesi Telegram'a gönderiliyor...")
+    # 1. Ham listeyi Telegram'a gönder
+    print("📤 Düzenli ham sinyal listesi Telegram'a iletiliyor...")
     send_telegram_text(raw_signals_msg)
     time.sleep(1)
 
-    # 2. ADIM: Şimdi multimodal Gemini analiz raporunu hazırla ve gönder
+    # 2. Gemini analiz raporunu hazırla ve gönder
     if signals_data:
         print("🤖 Multimodal Gemini analiz raporu hazırlanıyor...")
         report = analyze_charts_with_gemini(signals_data, btc_label)
@@ -575,10 +574,10 @@ def main():
             else:
                 send_telegram_text(report)
         else:
-            fallback_msg = "⚠️ Gemini Raporu Üretilemedi. Detaylar üstteki mesajda mevcuttur."
+            fallback_msg = "⚠️ Gemini Raporu Üretilemedi. Ham veriler üstteki mesaj kutusundadır."
             send_telegram_text(fallback_msg)
             
-    print("🏁 Tarama döngüsü başarıyla tamamlandı. GitHub Actions kapatılıyor.")
+    print("🏁 Tarama döngüsü başarıyla tamamlandı.")
 
 def log_signal(s):
     file_exists = os.path.exists(LOG_FILE)
