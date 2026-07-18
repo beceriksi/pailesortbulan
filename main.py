@@ -517,6 +517,11 @@ def main():
     print(f"📊 Toplam {len(candidates)} teknik aday bulundu, detaylar çekiliyor...")
     signals_data = []
     
+    # Telegram'a gidecek ham adaylar mesaj metni başlangıcı
+    raw_signals_msg = f"🔍 *PİYASA TARAMA SONUÇLARI (HAM BİLGİLER)*\n"
+    raw_signals_msg += f"Piyasa Genel Trendi (BTC): #{btc_label}\n"
+    raw_signals_msg += f"----------------------------------------\n\n"
+
     for coin in candidates:
         symbol = coin["symbol"]
         oi_label, _ = get_oi_trend(symbol)
@@ -545,6 +550,9 @@ def main():
             "text_data": text_summary
         })
 
+        # Ham verileri Telegram mesaj metnine ekle
+        raw_signals_msg += f"🚨 *{symbol}*\n{text_summary}\n\n"
+
         log_signal({
             'symbol': symbol, 'entry_price': coin['current_price'], 'rsi': coin['rsi'],
             'chg': coin['chg'], 'res_4h': 0, 'res_1h': coin['res_1h'], 'urgent': confirm_count,
@@ -552,6 +560,12 @@ def main():
             'ratio': 0, 'btc_trend_label': btc_label
         })
 
+    # 1. ADIM: Önce yakalanan tüm ham sinyalleri Telegram'a raporla
+    print("📤 Ham sinyal listesi Telegram'a gönderiliyor...")
+    send_telegram_text(raw_signals_msg)
+    time.sleep(1)
+
+    # 2. ADIM: Şimdi multimodal Gemini analiz raporunu hazırla ve gönder
     if signals_data:
         print("🤖 Multimodal Gemini analiz raporu hazırlanıyor...")
         report = analyze_charts_with_gemini(signals_data, btc_label)
@@ -561,7 +575,7 @@ def main():
             else:
                 send_telegram_text(report)
         else:
-            fallback_msg = "⚠️ Gemini Raporu Üretilemedi. Ham Aday Verisi:\n\n" + signals_data[0]["text_data"]
+            fallback_msg = "⚠️ Gemini Raporu Üretilemedi. Detaylar üstteki mesajda mevcuttur."
             send_telegram_text(fallback_msg)
             
     print("🏁 Tarama döngüsü başarıyla tamamlandı. GitHub Actions kapatılıyor.")
