@@ -17,7 +17,7 @@ CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 RSI_LIMIT = 70
-CHANGE_24H_LIMIT = 8         # Şartların orijinal haline sadık kalındı
+CHANGE_24H_LIMIT = 8         
 PIVOT_LEN = 4                
 LOG_FILE = "signals_log.csv" 
 MAX_PENDING_HOURS = 12       
@@ -163,7 +163,8 @@ def find_custom_sr(df, pivot_len=PIVOT_LEN):
         if all(highs[i] > highs[i-j] for j in range(1, pivot_len+1)) and \
            all(highs[i] > highs[i+j] for j in range(1, pivot_len+1)):
             p_highs.append(highs[i])
-        # Hatalı olan syntax ("for range") kısmı düzeltildi: "for j in range" yapıldı
+        
+        # Buradaki sözdizimi hatası tamamen düzeltildi (j in eklendi)
         if all(lows[i] < lows[i-j] for j in range(1, pivot_len+1)) and \
            all(lows[i] < lows[i+j] for j in range(1, pivot_len+1)):
             p_lows.append(lows[i])
@@ -531,4 +532,4 @@ def main():
         
         text_summary = (
             f"24s Değişim: %{coin['chg']:.1f} | 1H RSI: {coin['rsi']:.1f}\n"
-      
+            f"1H Direnç: {coin['res_1h']} | Anlık Fiya
