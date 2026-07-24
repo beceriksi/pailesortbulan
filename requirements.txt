@@ -1,5 +1,4 @@
 requests
 pandas
-pillow
 google-genai
 playwright
