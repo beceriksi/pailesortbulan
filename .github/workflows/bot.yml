@@ -36,7 +36,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python gem_hunter_bot.py
+        run: python main.py
 
       # 🚨 KRİTİK ADIM: signals_log.csv ve oi_state.json runner kapanınca silinir.
       # Bir sonraki çalıştırmanın açık sinyerleri/OI trendini görebilmesi için
