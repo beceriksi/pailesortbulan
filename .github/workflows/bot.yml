@@ -5,12 +5,17 @@ on:
     - cron: '*/15 * * * *' # Her 15 dakikada bir çalıştır
   workflow_dispatch: # Manuel tetikleme butonu
 
+permissions:
+  contents: write   # signals_log.csv / oi_state.json commit edebilmek için gerekli
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -22,7 +27,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 🚨 EKSİK OLAN VE BOTU ENGELLEYEN KRİTİK ADIM BURASI:
       - name: Install Playwright Chromium
         run: |
           playwright install chromium --with-deps
@@ -32,4 +36,15 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python main.py
+        run: python gem_hunter_bot.py
+
+      # 🚨 KRİTİK ADIM: signals_log.csv ve oi_state.json runner kapanınca silinir.
+      # Bir sonraki çalıştırmanın açık sinyerleri/OI trendini görebilmesi için
+      # bu dosyaları repoya geri commit'liyoruz.
+      - name: Persist bot state (log + oi state)
+        run: |
+          git config user.name "crypto-short-bot"
+          git config user.email "actions@github.com"
+          git add signals_log.csv oi_state.json 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: update bot state [skip ci]"
+          git push
