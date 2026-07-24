@@ -1,10 +1,9 @@
 import os
-import csv
+import json
 import time
 import requests
 import pandas as pd
 from datetime import datetime, timezone
-from PIL import Image
 from google import genai
 from google.genai import types
 from playwright.sync_api import sync_playwright
@@ -17,58 +16,118 @@ CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 RSI_LIMIT = 70
-CHANGE_24H_LIMIT = 8         
-PIVOT_LEN = 4                
-LOG_FILE = "signals_log.csv" 
-MAX_PENDING_HOURS = 12       
+CHANGE_24H_LIMIT = 8
+PIVOT_LEN = 4
+LOG_FILE = "signals_log.csv"
+OI_STATE_FILE = "oi_state.json"
+MAX_PENDING_HOURS = 12
+
+# --- Risk yönetimi ayarları (yeni) ---
+STOP_BUFFER_PCT = 0.008     # stop, dirençten %0.8 yukarıya konur
+MIN_RR = 1.5                # bu R:R'nin altındaki sinyaller elenir
+DEFAULT_TARGET_RR = 2.5     # destek bulunamazsa kullanılacak varsayılan R:R
+TOP_N_SIGNALS = 2           # detaylı olarak gönderilecek en iyi sinyal sayısı
+
+# --- Likidite ve squeeze riski (yeni) ---
+MIN_24H_VOLUME_USDT = 3_000_000   # bu 24s işlem hacminin altındaki coinler elenir (slippage riski)
+SQUEEZE_OI_INCREASE_PCT = 3       # negatif funding + bu oranın üzerinde OI artışı = short squeeze riski
+BUYER_DOMINANT_PCT = 15           # net alım baskısı bu değerin üzerindeyse short tezi çelişir -> elenir
 
 # =========================================================
 # TELEGRAM BİLDİRİM FONKSİYONLARI
 # =========================================================
+def _split_message_smart(msg, limit=4000):
+    """
+    DÜZELTME: Eskiden msg[i:i+4000] ile KÖR bölme yapılıyordu, bu da
+    *kalın* / _italik_ gibi Markdown etiketlerini ortadan ikiye bölüp
+    Telegram'ın 'can't parse entities' hatasıyla mesajı hiç göndermemesine
+    yol açabiliyordu. Şimdi satır sınırlarından bölüyoruz (bir Markdown
+    etiketi neredeyse hiçbir zaman satır ortasında bölünmez).
+    """
+    lines = msg.split("\n")
+    parts = []
+    current = ""
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            if current:
+                parts.append(current)
+            if len(line) > limit:
+                # tek satırın kendisi limiti aşıyorsa (nadir), onu da böl
+                for i in range(0, len(line), limit):
+                    parts.append(line[i:i + limit])
+                current = ""
+            else:
+                current = line
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _send_single_telegram_message(url, text):
+    """Markdown ile dener; entity parse hatası olursa düz metinle tekrar dener."""
+    try:
+        res = requests.post(url, json={
+            "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }, timeout=10)
+        if res.status_code != 200:
+            # Markdown parse hatası (kırık etiket vb.) -> düz metinle tekrar dene
+            requests.post(url, json={"chat_id": CHAT_ID, "text": text,
+                                      "disable_web_page_preview": True}, timeout=10)
+    except Exception as e:
+        print(f"Telegram metin hatası: {e}")
+
+
 def send_telegram_text(msg):
-    if TOKEN and CHAT_ID and msg:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        if len(msg) > 4000:
-            parts = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
-            for part in parts:
-                try:
-                    requests.post(url, json={
-                        "chat_id": CHAT_ID, "text": part, "parse_mode": "Markdown", "disable_web_page_preview": True
-                    }, timeout=10)
-                    time.sleep(0.5)
-                except Exception as e:
-                    print(f"Parçalı Telegram metin hatası: {e}")
-            return
-        try:
-            res = requests.post(url, json={
-                "chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True
-            }, timeout=10)
-            if res.status_code != 200:
-                requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "disable_web_page_preview": True}, timeout=10)
-        except Exception as e:
-            print(f"Telegram metin hatası: {e}")
+    if not (TOKEN and CHAT_ID and msg):
+        return
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    if len(msg) > 4000:
+        for part in _split_message_smart(msg):
+            _send_single_telegram_message(url, part)
+            time.sleep(0.5)
+        return
+    try:
+        res = requests.post(url, json={
+            "chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }, timeout=10)
+        if res.status_code != 200:
+            requests.post(url, json={"chat_id": CHAT_ID, "text": msg,
+                                      "disable_web_page_preview": True}, timeout=10)
+    except Exception as e:
+        print(f"Telegram metin hatası: {e}")
 
 
 def send_telegram_photo(photo_path, caption):
-    if TOKEN and CHAT_ID and os.path.exists(photo_path):
-        url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-        if len(caption) > 1000:
-            try:
-                with open(photo_path, 'rb') as photo:
-                    requests.post(url, data={"chat_id": CHAT_ID, "caption": "📸 GEMINI ALFA ANALİZ GRAFİĞİ"}, files={"photo": photo}, timeout=15)
-                time.sleep(1)
-                send_telegram_text(caption)
-            except Exception as e:
-                print(f"Fotoğraf/Metin split hatası: {e}")
-                send_telegram_text(caption)
-            return
+    if not (TOKEN and CHAT_ID and os.path.exists(photo_path)):
+        send_telegram_text(caption)
+        return
+    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+    if len(caption) > 1000:
         try:
-            res = requests.post(url, data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "Markdown"}, files={"photo": photo}, timeout=15)
-            if res.status_code != 200:
-                send_telegram_text(caption)
-        except Exception as e:
-            print(f"Telegram fotoğraf hatası: {e}")
+            with open(photo_path, 'rb') as photo:
+                requests.post(url, data={"chat_id": CHAT_ID, "caption": "📸 Analiz Grafiği"},
+                              files={"photo": photo}, timeout=15)
+            time.sleep(1)
             send_telegram_text(caption)
+        except Exception as e:
+            print(f"Fotoğraf/Metin split hatası: {e}")
+            send_telegram_text(caption)
+        return
+    try:
+        with open(photo_path, 'rb') as photo:
+            res = requests.post(url, data={"chat_id": CHAT_ID, "caption": caption,
+                                            "parse_mode": "Markdown"},
+                                 files={"photo": photo}, timeout=15)
+        if res.status_code != 200:
+            send_telegram_text(caption)
+    except Exception as e:
+        print(f"Telegram fotoğraf hatası: {e}")
+        send_telegram_text(caption)
 
 
 # =========================================================
@@ -79,8 +138,26 @@ def get_data(endpoint, params={}):
     try:
         res = requests.get(base + endpoint, params=params, timeout=10).json()
         return res.get('data', [])
-    except:
+    except Exception:
         return []
+
+
+def to_df_1h(raw, limit_used):
+    """
+    DÜZELTME: OKX'in 'conf' alanı mumun kapanıp kapanmadığını gösterir
+    ('0' = hâlâ oluşuyor, '1' = kapandı). Eskiden bu hiç kontrol edilmiyordu,
+    yani hâlâ değişebilen canlı mum pivot/RSI hesaplarına karışıyordu.
+    Burada onaylanmamış son mumu veri setinden atıyoruz; tüm analizler
+    sadece KAPANMIŞ mumlar üzerinden yapılıyor.
+    """
+    df = pd.DataFrame(raw, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
+    df[['o', 'h', 'l', 'c', 'v']] = df[['o', 'h', 'l', 'c', 'v']].astype(float)
+
+    # En sondaki mum hâlâ oluşuyorsa (conf == '0'), at.
+    if len(df) > 0 and str(df.iloc[-1]['conf']) == '0':
+        df = df.iloc[:-1].reset_index(drop=True)
+
+    return df
 
 
 # =========================================================
@@ -92,13 +169,10 @@ def get_btc_trend():
         if not c_1h or len(c_1h) < 55:
             return "BILINMIYOR", 0
 
-        df = pd.DataFrame(c_1h, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
-        df['c'] = df['c'].astype(float)
-
+        df = to_df_1h(c_1h, 60)
         ema20 = df['c'].ewm(span=20).mean().iloc[-1]
         ema50 = df['c'].ewm(span=50).mean().iloc[-1]
         last_price = df['c'].iloc[-1]
-
         chg_3h = (last_price / df['c'].iloc[-4] - 1) * 100 if len(df) >= 4 else 0
 
         if last_price > ema20 > ema50 or chg_3h > 1.5:
@@ -114,37 +188,50 @@ def get_btc_trend():
         return "BILINMIYOR", 0
 
 
+def calc_rsi_series(close):
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss.replace(0, 0.0001)
+    return 100 - (100 / (1 + rs))
+
+
 def check_rsi_price_divergence(df):
+    """
+    DÜZELTME: Eskiden df ve rsi_series'ten AYRI AYRI son 20 satır alınıyordu.
+    rolling(14) yüzünden RSI'nin ilk ~14 değeri NaN olduğundan, gelen mum
+    sayısı beklenenden azsa bu NaN'lar pencerenin içine sızıp sessizce
+    yanlış (veya kaçırılmış) uyumsuzluk sonucuna yol açabiliyordu.
+    Artık fiyat ve RSI aynı tabloda tutuluyor, NaN satırlar tamamen
+    atılıyor, böylece pencere her zaman geçerli (dolu) veriden oluşuyor.
+    """
     try:
         if df is None or len(df) < 30:
             return "Veri Yetersiz", False
 
-        close = df['c'].astype(float)
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss.replace(0, 0.0001)
-        rsi_series = 100 - (100 / (1 + rs))
+        work = df.copy()
+        work['rsi'] = calc_rsi_series(work['c'])
+        work = work.dropna(subset=['rsi']).reset_index(drop=True)
 
-        window = df.iloc[-20:].reset_index(drop=True)
-        rsi_window = rsi_series.iloc[-20:].reset_index(drop=True)
+        if len(work) < 20:
+            return "Veri Yetersiz", False
 
-        highs_idx = []
-        h = window['h'].astype(float).values
-        for i in range(2, len(h) - 2):
-            if h[i] > h[i-1] and h[i] > h[i-2] and h[i] > h[i+1] and h[i] > h[i+2]:
-                highs_idx.append(i)
+        window = work.iloc[-20:].reset_index(drop=True)
+        h = window['h'].values
+        rsi_vals = window['rsi'].values
+
+        highs_idx = [i for i in range(2, len(h) - 2)
+                     if h[i] > h[i-1] and h[i] > h[i-2] and h[i] > h[i+1] and h[i] > h[i+2]]
 
         if len(highs_idx) < 2:
             return "Uyumsuzluk Yok", False
 
         i1, i2 = highs_idx[-2], highs_idx[-1]
         price1, price2 = h[i1], h[i2]
-        rsi1, rsi2 = rsi_window.iloc[i1], rsi_window.iloc[i2]
+        rsi1, rsi2 = rsi_vals[i1], rsi_vals[i2]
 
         if price2 > price1 and rsi2 < rsi1:
             return "🔻 RSI AYI UYUMSUZLUĞU", True
-
         return "Uyumsuzluk Yok", False
     except Exception as e:
         print(f"Divergence hesap hatası: {e}")
@@ -152,32 +239,97 @@ def check_rsi_price_divergence(df):
 
 
 def find_custom_sr(df, pivot_len=PIVOT_LEN):
+    """Onaylanmış pivot high/low FİYAT listelerini döndürür (index değil)."""
     if len(df) < (pivot_len * 2 + 1):
         return [], []
 
-    highs = df['h'].astype(float).values
-    lows = df['l'].astype(float).values
+    highs = df['h'].values
+    lows = df['l'].values
     p_highs, p_lows = [], []
 
     for i in range(pivot_len, len(highs) - pivot_len):
-        if all(highs[i] > highs[i-j] for j in range(1, pivot_len+1)) and \
-           all(highs[i] > highs[i+j] for j in range(1, pivot_len+1)):
+        if all(highs[i] > highs[i - j] for j in range(1, pivot_len + 1)) and \
+           all(highs[i] > highs[i + j] for j in range(1, pivot_len + 1)):
             p_highs.append(highs[i])
-        
-        if all(lows[i] < lows[i-j] for j in range(1, pivot_len+1)) and \
-           all(lows[i] < lows[i+j] for j in range(1, pivot_len+1)):
+        if all(lows[i] < lows[i - j] for j in range(1, pivot_len + 1)) and \
+           all(lows[i] < lows[i + j] for j in range(1, pivot_len + 1)):
             p_lows.append(lows[i])
 
     return p_highs, p_lows
 
 
+def find_valid_resistance(df, current_price, pivot_len=PIVOT_LEN):
+    """
+    DÜZELTME: Eskiden 'res_1h' fiyatın altında bile olabiliyordu (kırılmış direnç).
+    Artık SADECE fiyatın ÜZERİNDE kalan, henüz kırılmamış en yakın pivotu döner.
+    Böyle bir seviye yoksa None döner -> sinyal reddedilir.
+    """
+    p_highs, _ = find_custom_sr(df, pivot_len)
+    above = [h for h in p_highs if h > current_price]
+    if not above:
+        return None
+    return min(above)  # fiyata en yakın olan üst direnç
+
+
+def find_target_support(df, current_price, pivot_len=PIVOT_LEN):
+    """Fiyatın ALTINDA kalan en yakın pivot low'u hedef (TP) adayı olarak döner."""
+    _, p_lows = find_custom_sr(df, pivot_len)
+    below = [l for l in p_lows if l < current_price]
+    if not below:
+        return None
+    return max(below)  # fiyata en yakın olan alt destek
+
+
+def calc_trade_levels(current_price, resistance):
+    """
+    Entry / Stop / Target / R:R hesaplar.
+    Stop: dirençten STOP_BUFFER_PCT kadar yukarı (yapı kırılırsa çık).
+    Target: varsa en yakın destek, yoksa DEFAULT_TARGET_RR ile hesaplanan seviye.
+    """
+    entry = current_price
+    stop = resistance * (1 + STOP_BUFFER_PCT)
+    risk = stop - entry
+
+    if risk <= 0:
+        return None  # entry zaten stop seviyesinin üstünde -> geçersiz
+
+    return {
+        "entry": entry,
+        "stop": stop,
+        "risk": risk,
+    }
+
+
+def finalize_target(levels, support):
+    """
+    NOT: rr < MIN_RR kontrolü burada da yapılıyor (çağıran yerde zaten var,
+    ama fonksiyon başka bir yerden çağrılırsa da güvenlik altında olsun diye
+    ikinci bir savunma katmanı). rr yetersizse levels None döner.
+    """
+    risk = levels["risk"]
+    entry = levels["entry"]
+    if support is not None and support < entry:
+        target = support
+        rr = (entry - target) / risk
+    else:
+        rr = DEFAULT_TARGET_RR
+        target = entry - risk * DEFAULT_TARGET_RR
+
+    if rr < MIN_RR:
+        return None  # destek girişe çok yakın -> kalitesiz R:R, sinyal geçersiz
+
+    levels["target"] = target
+    levels["rr"] = round(rr, 2)
+    return levels
+
+
 def check_volume_divergence(df):
     if len(df) < 5:
         return ""
-    p = df['c'].astype(float).iloc[-5:].values
-    v = df['v'].astype(float).iloc[-5:].values
+    p = df['c'].iloc[-5:].values
+    v = df['v'].iloc[-5:].values
     if p[-1] > p[0] and v[-1] < v[-2]:
-        return "⚠️ Hacimsiz Yükseliş (Zayıf Trend)"
+        return "⚠️ Hacimsiz Yükseliş"
     return ""
 
 
@@ -190,24 +342,29 @@ def check_candle_trigger_15m(symbol):
         df_15m = pd.DataFrame(c_15m, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
         df_15m[['o', 'h', 'l', 'c']] = df_15m[['o', 'h', 'l', 'c']].astype(float)
 
+        # Onaylanmamış (hâlâ oluşan) son mumu at - kapanmamış mum yanlış sinyal üretebilir
+        if len(df_15m) > 0 and str(df_15m.iloc[-1]['conf']) == '0':
+            df_15m = df_15m.iloc[:-1].reset_index(drop=True)
+
+        if len(df_15m) < 4:
+            return "Veri Alınamadı", 0
+
         last3 = df_15m.iloc[-3:].reset_index(drop=True)
-        o, h, l, c = last3.iloc[-1]['o'], last3.iloc[-1]['h'], last3.iloc[-1]['l'], last3.iloc[-1]['c']
+        o, h, l, c = last3.iloc[-1][['o', 'h', 'l', 'c']]
 
         body = abs(c - o)
         upper_wick = (h - max(o, c)) if h > max(o, c) else 0
         last_candle_bearish = (c < o) or (upper_wick > body * 0.8)
-
         lower_high = last3.iloc[-1]['h'] < last3.iloc[-2]['h']
         closes_weakening = last3.iloc[-1]['c'] < last3.iloc[-2]['c']
 
         confirmations = sum([last_candle_bearish, lower_high, closes_weakening])
-
         if confirmations >= 2:
-            return f"🚨 ACİL DURUM: REAKSİYON TEYİTLİ ({confirmations}/3)", confirmations
+            return f"Teyitli ({confirmations}/3)", confirmations
         elif confirmations == 1:
-            return "⚠️ Tek Teyit (Zayıf Reaksiyon)", 1
+            return "Zayıf Teyit (1/3)", 1
         else:
-            return "⏳ Grafik Güçlü (Dönüş Yok)", 0
+            return "Teyit Yok", 0
     except Exception as e:
         print(f"15m tetik hatası: {e}")
         return "Durum Okunamadı", 0
@@ -215,90 +372,116 @@ def check_candle_trigger_15m(symbol):
 
 def get_funding_rate(symbol):
     res = get_data("/api/v5/public/funding-rate", {"instId": symbol})
-    if res and len(res) > 0:
-        rate = float(res[0].get('fundingRate', 0))
-        rate_pct = rate * 100
+    if res:
+        rate_pct = float(res[0].get('fundingRate', 0)) * 100
         if rate_pct < -0.05:
-            return f"%{rate_pct:.3f}", "⚠️ AŞIRI NEGATİF FL (Short Riski)"
+            return f"%{rate_pct:.3f}", "⚠️ Aşırı negatif FL (short sıkışma riski)"
         elif rate_pct > 0.08:
-            return f"%{rate_pct:.3f}", "🔥 AŞIRI POZİTİF FL (Kaldıraçlı Long Yoğun)"
+            return f"%{rate_pct:.3f}", "🔥 Aşırı pozitif FL"
         return f"%{rate_pct:.3f}", ""
-    return "Veri Alınamadı", ""
+    return "N/A", ""
 
 
-def get_oi_trend(symbol):
+# --- OI trendi: gerçek zamanlı karşılaştırma için basit local state ---
+def load_oi_state():
+    if os.path.exists(OI_STATE_FILE):
+        try:
+            with open(OI_STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_oi_state(state):
     try:
-        inst_id = symbol if "-SWAP" in symbol else f"{symbol.split('-')[0]}-USDT-SWAP"
-        res = get_data("/api/v5/public/open-interest", {"instId": inst_id})
-        
-        if not res or len(res) == 0:
-            return "OI Verisi Alınamadı", 0
+        with open(OI_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"OI state kayıt hatası: {e}")
+
+
+def get_oi_trend(symbol, oi_state):
+    """
+    DÜZELTME: Eskiden sabit '>100000' eşiği ile anlamsız bir yorum üretiyordu.
+    Artık bir önceki tarama döngüsündeki OI değeriyle KIYASLIYOR (gerçek trend).
+    """
+    try:
+        res = get_data("/api/v5/public/open-interest", {"instId": symbol})
+        if not res:
+            return "OI Alınamadı", 0
 
         oi_now = float(res[0].get('oi', 0))
-        comment = "Short Pozitif Birikim" if oi_now > 100000 else "Dengeli"
-        return f"{oi_now:.0f} Kontrat ({comment})", oi_now
+        oi_prev = oi_state.get(symbol)
+        oi_state[symbol] = oi_now
+
+        if oi_prev is None or oi_prev == 0:
+            return f"{oi_now:.0f} (ilk ölçüm)", oi_now
+
+        change_pct = (oi_now / oi_prev - 1) * 100
+        if change_pct > 3:
+            return f"{oi_now:.0f} (OI +%{change_pct:.1f} artıyor)", oi_now
+        elif change_pct < -3:
+            return f"{oi_now:.0f} (OI -%{abs(change_pct):.1f} azalıyor)", oi_now
+        else:
+            return f"{oi_now:.0f} (stabil)", oi_now
     except Exception as e:
         print(f"OI hatası ({symbol}): {e}")
-        return "OI Verisi Çekilemedi", 0
+        return "OI Alınamadı", 0
 
 
 def get_net_buying_pressure(symbol):
+    """
+    DÜZELTME: Eskiden /rubik/stat/taker-volume endpoint'i SWAP sembolleri için
+    veri döndürmüyordu ('Veri Yok'). Artık son trade'lerden (public/trades)
+    doğrudan alış/satış hacmi hesaplanıyor.
+    """
     try:
-        inst_id = symbol if "-SWAP" in symbol else f"{symbol.split('-')[0]}-USDT-SWAP"
-        res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": inst_id, "period": "1H"})
-        
-        if res and len(res) > 0:
-            buy_vol = float(res[0][1])   
-            sell_vol = float(res[0][2])  
-            total_vol = buy_vol + sell_vol
+        trades = get_data("/api/v5/market/trades", {"instId": symbol, "limit": "500"})
+        if not trades:
+            return "Veri Yok", 0
 
-            if total_vol == 0:
-                return "Hacim Yok", 0
+        buy_vol = sum(float(t['sz']) for t in trades if t.get('side') == 'buy')
+        sell_vol = sum(float(t['sz']) for t in trades if t.get('side') == 'sell')
+        total = buy_vol + sell_vol
+        if total == 0:
+            return "Hacim Yok", 0
 
-            net_pressure_pct = ((buy_vol - sell_vol) / total_vol) * 100
-            
-            if net_pressure_pct > 15:
-                return f"+%{net_pressure_pct:.1f} (Alıcı Baskın)", net_pressure_pct
-            elif net_pressure_pct < -15:
-                return f"%{net_pressure_pct:.1f} (Satıcı Baskın)", net_pressure_pct
-            else:
-                return f"%{net_pressure_pct:.1f} (Dengeli)", net_pressure_pct
-        
-        return "Veri Yok", 0
+        net_pct = ((buy_vol - sell_vol) / total) * 100
+        if net_pct > BUYER_DOMINANT_PCT:
+            return f"+%{net_pct:.1f} Alıcı baskın", net_pct
+        elif net_pct < -BUYER_DOMINANT_PCT:
+            return f"%{net_pct:.1f} Satıcı baskın", net_pct
+        return f"%{net_pct:.1f} Dengeli", net_pct
     except Exception as e:
-        print(f"Saf alım baskısı hatası ({symbol}): {e}")
+        print(f"Alım baskısı hatası ({symbol}): {e}")
         return "Veri Yok", 0
 
 
 # =========================================================
 # SİNYAL TAKİP VE GÜNCELLEME SİSTEMİ
 # =========================================================
-def check_signal_status(symbol, entry_price, entry_rsi, res_1h):
+def check_signal_status(symbol, entry_price, stop, target, entry_rsi):
     try:
-        c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "30"})
-        if not c_1h or len(c_1h) < 20:
+        c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "10"})
+        if not c_1h or len(c_1h) < 3:
             return "PENDING", 0
 
-        df = pd.DataFrame(c_1h, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
-        df['c'] = df['c'].astype(float)
-
-        last_closed = df.iloc[-2]  
+        df = to_df_1h(c_1h, 10)
+        if len(df) < 1:
+            return "PENDING", 0
+        last_closed = df.iloc[-1]  # to_df_1h zaten onaylanmamış mumu attı
         current_close = float(last_closed['c'])
+        current_high = float(last_closed['h'])
+        current_low = float(last_closed['l'])
         pct_move = (current_close / entry_price - 1) * 100
 
-        delta = df['c'].diff()
-        g = (delta.where(delta > 0, 0)).rolling(14).mean()
-        l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        last_g, last_l = g.iloc[-2], l.iloc[-2]
-        current_rsi = 100 - (100 / (1 + last_g / last_l)) if last_l != 0 else 50
+        # Stop seviyesine mumun İÇİNDE değdiyse (sadece kapanışa değil, high'a bak)
+        if current_high >= stop:
+            return "STOPPED", pct_move
 
-        if res_1h and res_1h > 0 and current_close > res_1h * 1.003:
-            return "INVALIDATE_STRUCTURE", pct_move
-
-        if current_rsi > entry_rsi + 5 and current_close > entry_price:
-            return "INVALIDATE_MOMENTUM", pct_move
-
-        if pct_move <= -3:
+        # Hedefe mumun düşüğü ulaştıysa
+        if current_low <= target:
             return "SUCCESS", pct_move
 
         return "PENDING", pct_move
@@ -308,7 +491,7 @@ def check_signal_status(symbol, entry_price, entry_rsi, res_1h):
 
 
 def update_open_signals():
-    print("⏳ Mevcut açık sinyaller kontrol ediliyor...")
+    print("⏳ Açık sinyaller kontrol ediliyor...")
     if not os.path.exists(LOG_FILE):
         return
 
@@ -331,34 +514,29 @@ def update_open_signals():
         try:
             symbol = row["symbol"]
             entry_price = float(row["entry_price"])
+            stop = float(row["stop"])
+            target = float(row["target"])
             entry_rsi = float(row["rsi"])
-            res_1h = float(row["res_1h"]) if pd.notna(row["res_1h"]) else 0
 
-            status, pct_move = check_signal_status(symbol, entry_price, entry_rsi, res_1h)
+            status, pct_move = check_signal_status(symbol, entry_price, stop, target, entry_rsi)
 
             ts = pd.to_datetime(row["timestamp_utc"])
             if ts.tzinfo is None:
                 ts = ts.tz_localize("UTC")
             hours_passed = (now - ts).total_seconds() / 3600
 
-            if status == "INVALIDATE_STRUCTURE":
-                df.at[idx, "outcome"] = "BASARISIZ (direnc kirildi)"
+            if status == "STOPPED":
+                df.at[idx, "outcome"] = "STOP OLDU"
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
                 df.at[idx, "resolved"] = "TRUE"
                 updated = True
-                notify_msgs.append(f"🔁 *SİNYAL GEÇERSİZ (YAPI KIRILDI):* {symbol} 1H direnç seviyesinin üzerinde kapandı (%{pct_move:.1f}). Short tezi geçersiz.")
-            elif status == "INVALIDATE_MOMENTUM":
-                df.at[idx, "outcome"] = "BASARISIZ (momentum geri geldi)"
-                df.at[idx, "outcome_pct"] = round(pct_move, 2)
-                df.at[idx, "resolved"] = "TRUE"
-                updated = True
-                notify_msgs.append(f"📉 *SİNYAL GEÇERSİZ (MOMENTUM DÖNDÜ):* {symbol} için aşırı alım bölgesi tükenmedi, RSI yükseliyor (%{pct_move:.1f}).")
+                notify_msgs.append(f"🛑 *STOP:* {symbol} stop seviyesine ulaştı (%{pct_move:.1f}).")
             elif status == "SUCCESS":
-                df.at[idx, "outcome"] = "BAŞARILI (hedef yakalandı)"
+                df.at[idx, "outcome"] = "HEDEF TUTTU"
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
                 df.at[idx, "resolved"] = "TRUE"
                 updated = True
-                notify_msgs.append(f"💰 *SİNYAL BAŞARILI:* {symbol} beklendiği gibi dirençten çöktü! Hareket: %{pct_move:.1f}")
+                notify_msgs.append(f"💰 *HEDEF:* {symbol} hedef seviyesine ulaştı (%{pct_move:.1f}).")
             elif hours_passed > MAX_PENDING_HOURS:
                 df.at[idx, "outcome"] = "ZAMAN ASIMI"
                 df.at[idx, "outcome_pct"] = round(pct_move, 2)
@@ -374,8 +552,47 @@ def update_open_signals():
             send_telegram_text(msg)
 
 
+def get_open_symbols():
+    """
+    YENİ: CSV'de 'resolved' = FALSE olan (yani hâlâ sonuçlanmamış) sembolleri
+    döndürür. main() bu setle, açık pozisyonu olan coinler için tekrar
+    'yeni giriş' sinyali göndermeyi engeller.
+    """
+    if not os.path.exists(LOG_FILE):
+        return set()
+    try:
+        df = pd.read_csv(LOG_FILE)
+    except Exception:
+        return set()
+    if df.empty:
+        return set()
+    open_rows = df[df["resolved"].astype(str) != "TRUE"]
+    return set(open_rows["symbol"].tolist())
+
+
+def log_signal(sig):
+    row = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "symbol": sig["symbol"],
+        "entry_price": sig["entry"],
+        "stop": sig["stop"],
+        "target": sig["target"],
+        "rr": sig["rr"],
+        "rsi": sig["rsi"],
+        "resolved": "FALSE",
+        "outcome": "",
+        "outcome_pct": "",
+    }
+    file_exists = os.path.exists(LOG_FILE)
+    df_row = pd.DataFrame([row])
+    if file_exists:
+        df_row.to_csv(LOG_FILE, mode="a", header=False, index=False)
+    else:
+        df_row.to_csv(LOG_FILE, mode="w", header=True, index=False)
+
+
 # =========================================================
-# EKRAN GÖRÜNTÜSÜ VE GEMINI ENTEGRASYONU
+# EKRAN GÖRÜNTÜSÜ VE GEMINI ENTEGRASYONU (sadece TOP sinyal için)
 # =========================================================
 def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
     url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=OKX:{tv_symbol}.P&interval=60&theme=dark&style=1"
@@ -384,7 +601,7 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(url, wait_until="networkidle")
-            page.wait_for_timeout(5000) 
+            page.wait_for_timeout(5000)
             page.screenshot(path=output_path)
             browser.close()
         return True
@@ -393,209 +610,239 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
         return False
 
 
-def analyze_charts_with_gemini(signals_data, btc_trend_label):
-    if not GEMINI_API_KEY or not signals_data:
+def analyze_top_signal_with_gemini(sig, btc_trend_label):
+    """
+    DÜZELTME: Eskiden prompt Gemini'ye short tezini önceden kabul ettirip
+    'destekleyen 2-3 madde' istiyordu -> bu, onay yanlılığı (confirmation
+    bias) yaratıyordu, Gemini hiçbir zaman 'bu short mantıksız' diyemiyordu.
+    Şimdi tezi SAVUNMASI değil, BAĞIMSIZ değerlendirmesi isteniyor; açıkça
+    katılmama/şüpheci olma seçeneği tanınıyor.
+    """
+    if not GEMINI_API_KEY:
         return None
-
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        contents = []
-
-        # STRICT PROMPT: Modelin gereksiz cümle kurmasını tamamen engelledik.
         prompt = f"""
-        Sen profesyonel bir veri analitiği botusun. Hikaye yazma, uzun paragraflar kurma.
-        Genel BTC Trendi: {btc_trend_label}. 
-        Gelen grafikleri ve metin verilerini incele, SADECE aşağıdaki şablona sadık kalarak, en özet maddeler halinde çıktı üret.
+Sen bağımsız, tarafsız bir teknik analiz botusun. Sana bir short (satış) tezi
+SUNULUYOR ama bu tezi savunmak ZORUNDA DEĞİLSİN. Veriyi ve grafiği kendi
+başına değerlendir; tez zayıfsa açıkça karşı çık.
 
-        🤖 **GEMINI RAPORU**
-        ──────────────────
-        • **Aday Durumları:**
-        [İncelediğin her parite için sadece 1 kısa cümlelik teknik veri durum özeti, örn: "SOL-USDT: RSI şişkin, dirençte dönüş arıyor."]
+BTC Trendi: {btc_trend_label}
+Coin: {sig['symbol']}
+Önerilen Short - Entry: {sig['entry']:.5f} | Stop: {sig['stop']:.5f} | Hedef: {sig['target']:.5f} | R:R: {sig['rr']}
+RSI: {sig['rsi']:.1f} | Funding: {sig['funding']} {sig['fl_flag']}
+OI: {sig['oi_label']} | Alım/Satım: {sig['pressure_label']}
 
-        👑 **ALFA SEÇİMİ (SHORT)**
-        ──────────────────
-        🎯 **Coin:** [Seçilen Parite]
-        💡 **Neden?:** [En önemli 2 teknik sebep, yan yana yazılacak]
-        🛑 **Stop:** [Yapısal direnç seviyesi]
-        """
-        contents.append(prompt)
+Sadece şu şablonla, en fazla 3 madde, kısa cümlelerle cevap ver:
+🤖 *Gemini Görüşü:* [ONAYLIYORUM / TEREDDÜTLÜYÜM / KATILMIYORUM]
+[1-2 kısa cümle gerekçe - varsa tezi zayıflatan bir nokta belirt]
+"""
+        contents = [prompt]
+        if os.path.exists(sig.get("img_path", "")):
+            with open(sig["img_path"], 'rb') as f:
+                contents.append(types.Part.from_bytes(data=f.read(), mime_type='image/png'))
 
-        for item in signals_data:
-            if os.path.exists(item['img_path']):
-                with open(item['img_path'], 'rb') as f:
-                    img_bytes = f.read()
-                contents.append(
-                    types.Part.from_bytes(
-                        data=img_bytes,
-                        mime_type='image/png'
-                    )
-                )
-            contents.append(f"Coin: {item['symbol']} Teknik Özeti:\n{item['text_data']}\n\n")
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-        )
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
         return response.text
     except Exception as e:
-        print(f"Gemini multimodal analiz hatası: {e}")
+        print(f"Gemini analiz hatası: {e}")
         return None
 
 
+
 # =========================================================
-# ORİJİNAL VE TAM OKX PİYASA TARAMA DÖNGÜSÜ
+# PİYASA TARAMA DÖNGÜSÜ
 # =========================================================
 def get_market_candidates():
-    print("🌐 OKX Borsasındaki aktif vadeli işlem pariteleri taranıyor...")
+    print("🌐 OKX vadeli işlem pariteleri taranıyor...")
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
-    candidates = []
-
     if not tickers:
-        print("⚠️ Ticker verisi borsa API'sinden çekilemedi.")
+        print("⚠️ Ticker verisi alınamadı.")
         return []
 
     usdt_swaps = [t for t in tickers if t['instId'].endswith("-USDT-SWAP")]
+    candidates = []
 
     for t in usdt_swaps:
         symbol = t['instId']
         try:
             chg24h = ((float(t['last']) / float(t['open24h'])) - 1) * 100
-        except:
+        except Exception:
             continue
 
         if chg24h < CHANGE_24H_LIMIT:
             continue
 
-        c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "35"})
+        # --- YENİ: likidite filtresi - düşük hacimli coinlerde slippage riski yüksek ---
+        try:
+            vol_24h_usdt = float(t.get('volCcy24h', 0))
+        except Exception:
+            vol_24h_usdt = 0
+        if vol_24h_usdt < MIN_24H_VOLUME_USDT:
+            continue
+
+        c_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "45"})
         if not c_1h or len(c_1h) < 20:
             continue
 
-        df = pd.DataFrame(c_1h, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'vc', 'vq', 'conf']).iloc[::-1].reset_index(drop=True)
-        df['c'] = df['c'].astype(float)
-        
-        delta = df['c'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss.replace(0, 0.0001)
-        rsi = 100 - (100 / (1 + rs))
-        last_rsi = rsi.iloc[-1]
-
+        df = to_df_1h(c_1h, 35)
+        last_rsi = calc_rsi_series(df['c']).iloc[-1]
         vol_div = check_volume_divergence(df)
-        has_vol_anomaly = vol_div != ""
+        current_price = float(t['last'])
 
-        if last_rsi >= RSI_LIMIT or has_vol_anomaly:
-            p_highs, p_lows = find_custom_sr(df)
-            res_1h = p_highs[-1] if p_highs else (df['h'].astype(float).max())
+        if last_rsi < RSI_LIMIT and vol_div == "":
+            continue
 
-            candidates.append({
-                "symbol": symbol,
-                "current_price": float(t['last']),
-                "chg": chg24h,
-                "rsi": last_rsi,
-                "res_1h": res_1h,
-                "vol_anomaly": vol_div,
-                "df_1h": df
-            })
-            
+        # --- DÜZELTME: sadece fiyatın ÜZERİNDE kalan, kırılmamış direnç kabul edilir ---
+        resistance = find_valid_resistance(df, current_price)
+        if resistance is None:
+            continue  # direnç zaten kırılmış -> geçersiz short adayı, atla
+
+        levels = calc_trade_levels(current_price, resistance)
+        if levels is None:
+            continue
+
+        support = find_target_support(df, current_price)
+        levels = finalize_target(levels, support)
+        if levels is None:
+            continue  # R:R yetersiz (MIN_RR altında) -> kalitesiz sinyal, atla
+
+        candidates.append({
+            "symbol": symbol,
+            "chg": chg24h,
+            "rsi": last_rsi,
+            "resistance": resistance,
+            "vol_anomaly": vol_div,
+            "vol_24h_usdt": vol_24h_usdt,
+            "df_1h": df,
+            **levels,
+        })
+
     return candidates
+
+
+def score_candidate(c):
+    """Basit, kural tabanlı skorlama -> en iyi sinyali seçmek için."""
+    score = 0
+    score += min(c["rsi"] - RSI_LIMIT, 20)          # ne kadar aşırı alım o kadar puan (üst sınır 20)
+    score += c["rr"] * 5                             # R:R yüksekse puan yüksek
+    if c["vol_anomaly"]:
+        score += 5
+    if c.get("has_div"):
+        score += 8
+    if c.get("confirm_count", 0) >= 2:
+        score += 10
+    # Satıcı baskınsa (pressure_pct negatifse) short tezini destekler -> puan ekle
+    pressure_pct = c.get("pressure_pct", 0)
+    if pressure_pct < 0:
+        score += min(abs(pressure_pct) * 0.3, 10)
+    return score
 
 
 # =========================================================
 # ANA YÜRÜTÜCÜ (MAINLOOP)
 # =========================================================
 def main():
-    print(f"🚀 Gem Hunter Botu Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
-    
+    print(f"🚀 Bot Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
+
     update_open_signals()
-    
-    btc_label, btc_score = get_btc_trend()
-    
+    btc_label, _ = get_btc_trend()
+    oi_state = load_oi_state()
+
     candidates = get_market_candidates()
     if not candidates:
-        print("📭 Bu tarama döngüsünde kriterlere uyan aday bulunamadı.")
+        print("📭 Kriterlere uyan aday bulunamadı.")
         return
 
-    signals_data = []
-    
-    # HAM LİSTE TASARIMI: Blok yapıda, göz yormayacak şekilde sadeleştirildi.
-    raw_signals_msg = f"🔍 *PİYASA TARAMA SONUÇLARI*\n"
-    raw_signals_msg += f"🌐 *BTC:* `{btc_label}`\n"
-    raw_signals_msg += f"───────────────────────\n\n"
+    # Ek verileri doldur ve skorla
+    for c in candidates:
+        symbol = c["symbol"]
+        div_label, has_div = check_rsi_price_divergence(c["df_1h"])
+        trigger_label, confirm_count = check_candle_trigger_15m(symbol)
+        funding_raw, fl_flag = get_funding_rate(symbol)
+        oi_label, _ = get_oi_trend(symbol, oi_state)
+        pressure_label, pressure_pct = get_net_buying_pressure(symbol)
 
-    for coin in candidates:
-        symbol = coin["symbol"]
-        oi_label, _ = get_oi_trend(symbol)
-        pressure_label, _ = get_net_buying_pressure(symbol)
-        
-        div_label, has_div = check_rsi_price_divergence(coin["df_1h"]) 
-        urgent_label, confirm_count = check_candle_trigger_15m(symbol)
-        funding_raw, fl_label = get_funding_rate(symbol)
-        
-        img_path = f"{symbol.split('-')[0]}_chart.png"
-        take_tradingview_screenshot(symbol, img_path) 
-        
-        text_summary = (
-            f"• *%24s:* `%_{coin['chg']:.1f}_` | *RSI:* `{coin['rsi']:.1f}`\n"
-            f"• *Fiyat/Direnç:* `{coin['current_price']}` / `{coin['res_1h']}`\n"
-            f"• *15m Teyit:* `{urgent_label}`\n"
-            f"• *Uyumsuzluk:* `{div_label}`\n"
-            f"• *Hacim:* `{coin['vol_anomaly'] if coin['vol_anomaly'] else 'Normal'}`\n"
-            f"• *Funding:* `{funding_raw}` {fl_label}\n"
-            f"• *OI:* `{oi_label}`\n"
-            f"• *Saf Alım:* `{pressure_label}`"
+        # --- YENİ: negatif funding + artan OI = short squeeze riski -> elenir ---
+        is_squeeze_risk = ("Short Riski" in fl_flag) and ("artıyor" in oi_label)
+        # --- YENİ: alıcı baskınsa short tezi zaten çelişiyor demektir -> elenir ---
+        is_buyer_dominant = pressure_pct > BUYER_DOMINANT_PCT
+
+        c.update({
+            "div_label": div_label, "has_div": has_div,
+            "trigger_label": trigger_label, "confirm_count": confirm_count,
+            "funding": funding_raw, "fl_flag": fl_flag,
+            "oi_label": oi_label, "pressure_label": pressure_label, "pressure_pct": pressure_pct,
+            "squeeze_risk": is_squeeze_risk, "buyer_dominant": is_buyer_dominant,
+        })
+        c["score"] = score_candidate(c)
+
+    save_oi_state(oi_state)
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # --- YENİ: hâlihazırda açık (sonuçlanmamış) pozisyonu olan coinleri öğren ---
+    open_symbols = get_open_symbols()
+
+    # --- SADE ÖZET LİSTESİ: her aday tek satır ---
+    lines = [f"🔍 *TARAMA* — BTC: `{btc_label}` — {len(candidates)} aday\n"]
+    for c in candidates:
+        tags = ""
+        if c["has_div"]:
+            tags += "🔻"
+        if c["confirm_count"] >= 2:
+            tags += "🚨"
+        if c["squeeze_risk"]:
+            tags += "⚠️SQUEEZE"
+        if c["buyer_dominant"]:
+            tags += "⚠️ALICI BASKIN"
+        if c["symbol"] in open_symbols:
+            tags += " (📌 açık pozisyon var, yeni giriş DEĞİL)"
+        lines.append(
+            f"• `{c['symbol']}` RSI:{c['rsi']:.0f} 24s:%{c['chg']:.1f} "
+            f"R:R {c['rr']} Al/Sat:%{c['pressure_pct']:.0f} {tags}"
         )
-        
-        signals_data.append({
-            "symbol": symbol,
-            "img_path": img_path,
-            "text_data": text_summary
-        })
+    send_telegram_text("\n".join(lines))
 
-        raw_signals_msg += f"🚨 *{symbol}*\n{text_summary}\n"
-        raw_signals_msg += f"───────────────────────\n\n"
+    # --- DETAYLI BLOK: sadece en iyi TOP_N sinyal ---
+    # Açık pozisyonu olan, squeeze riski taşıyan veya alıcı baskın (short
+    # tezini çürüten) coinler yeni giriş önerisi olarak GÖNDERİLMEZ.
+    eligible = [c for c in candidates
+                if c["symbol"] not in open_symbols
+                and not c["squeeze_risk"]
+                and not c["buyer_dominant"]]
+    top_signals = eligible[:TOP_N_SIGNALS]
 
-        log_signal({
-            'symbol': symbol, 'entry_price': coin['current_price'], 'rsi': coin['rsi'],
-            'chg': coin['chg'], 'res_4h': 0, 'res_1h': coin['res_1h'], 'urgent': confirm_count,
-            'has_divergence': str(has_div), 'funding_raw': funding_raw, 'oi_trend_raw': oi_label,
-            'ratio': 0, 'btc_trend_label': btc_label
-        })
+    for sig in top_signals:
+        img_path = f"{sig['symbol'].split('-')[0]}_chart.png"
+        got_chart = take_tradingview_screenshot(sig['symbol'].replace("-SWAP", ""), img_path)
+        sig["img_path"] = img_path
 
-    print("📤 Düzenli ham sinyal listesi Telegram'a iletiliyor...")
-    send_telegram_text(raw_signals_msg)
-    time.sleep(1)
+        detail = (
+            f"👑 *SİNYAL: {sig['symbol']}*\n"
+            f"───────────────────────\n"
+            f"🎯 Entry: `{sig['entry']:.5f}`\n"
+            f"🛑 Stop: `{sig['stop']:.5f}` (direnç: {sig['resistance']:.5f})\n"
+            f"✅ Hedef: `{sig['target']:.5f}`\n"
+            f"⚖️ R:R: `{sig['rr']}`\n"
+            f"📊 RSI: `{sig['rsi']:.1f}` | 24s: `%{sig['chg']:.1f}` | Hacim: `${sig['vol_24h_usdt']:,.0f}`\n"
+            f"📈 Uyumsuzluk: {sig['div_label']}\n"
+            f"🕯️ 15m Teyit: {sig['trigger_label']}\n"
+            f"💵 Funding: {sig['funding']} {sig['fl_flag']}\n"
+            f"🧮 OI: {sig['oi_label']}\n"
+            f"⚡ Alım/Satım: {sig['pressure_label']}\n"
+        )
 
-    if signals_data:
-        print("🤖 Multimodal Gemini analiz raporu hazırlanıyor...")
-        report = analyze_charts_with_gemini(signals_data, btc_label)
-        if report:
-            if os.path.exists(signals_data[0]["img_path"]):
-                send_telegram_photo(signals_data[0]["img_path"], report)
-            else:
-                send_telegram_text(report)
+        gemini_note = analyze_top_signal_with_gemini(sig, btc_label)
+        if gemini_note:
+            detail += f"\n{gemini_note}"
+
+        if got_chart:
+            send_telegram_photo(img_path, detail)
         else:
-            fallback_msg = "⚠️ Gemini Raporu Üretilemedi."
-            send_telegram_text(fallback_msg)
-            
-    print("🏁 Tarama döngüsü başarıyla tamamlandı.")
+            send_telegram_text(detail)
 
-def log_signal(s):
-    file_exists = os.path.exists(LOG_FILE)
-    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow([
-                "timestamp_utc", "symbol", "entry_price", "rsi", "chg24h",
-                "res_4h", "res_1h", "candle_confirmations", "divergence",
-                "funding", "oi_trend", "vol_ratio", "btc_trend",
-                "outcome", "outcome_pct", "resolved"
-            ])
-        writer.writerow([
-            datetime.now(timezone.utc).isoformat(), s['symbol'], s['entry_price'],
-            s['rsi'], s['chg'], s['res_4h'], s['res_1h'], s['urgent'],
-            s['has_divergence'], s['funding_raw'], s['oi_trend_raw'], s['ratio'],
-            s['btc_trend_label'], "", "", "FALSE"
-        ])
+        log_signal(sig)
+
 
 if __name__ == "__main__":
     main()
