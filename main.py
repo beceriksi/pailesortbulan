@@ -725,6 +725,11 @@ def log_signal(sig):
 # EKRAN GÖRÜNTÜSÜ VE GEMINI ENTEGRASYONU (sadece TOP sinyal için)
 # =========================================================
 def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
+    """
+    tv_symbol TradingView/OKX perpetual formatında olmalı (örn. 'BASEDUSDT',
+    tiresiz). Çağıran taraf OKX instId'sini (örn. 'BASED-USDT-SWAP') bu
+    formata çevirmekten sorumlu - bkz. main() içindeki dönüşüm.
+    """
     url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=OKX:{tv_symbol}.P&interval=60&theme=dark&style=1"
     try:
         with sync_playwright() as p:
@@ -945,7 +950,9 @@ def main():
 
     for sig in top_signals:
         img_path = f"{sig['symbol'].split('-')[0]}_chart.png"
-        got_chart = take_tradingview_screenshot(sig['symbol'].replace("-SWAP", ""), img_path)
+        # DÜZELTME: 'BASED-USDT-SWAP' -> 'BASEDUSDT' (TradingView tiresiz format bekliyor)
+        tv_symbol = sig['symbol'].replace("-SWAP", "").replace("-", "")
+        got_chart = take_tradingview_screenshot(tv_symbol, img_path)
         sig["img_path"] = img_path
 
         detail = (
