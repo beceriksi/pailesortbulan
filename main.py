@@ -22,6 +22,10 @@ LOG_FILE = "signals_log.csv"
 OI_STATE_FILE = "oi_state.json"
 MAX_PENDING_HOURS = 12
 
+# --- Günlük rapor ayarları (yeni) ---
+DAILY_REPORT_HOUR_UTC = 6          # rapor her gün bu UTC saatinde (ilk 15dk içinde) gönderilir
+REPORT_STATE_FILE = "daily_report_state.json"
+
 # --- Risk yönetimi ayarları (yeni) ---
 STOP_BUFFER_PCT = 0.008     # stop, dirençten %0.8 yukarıya konur
 MIN_RR = 1.5                # bu R:R'nin altındaki sinyaller elenir
@@ -490,6 +494,21 @@ def check_signal_status(symbol, entry_price, stop, target, entry_rsi):
         return "PENDING", 0
 
 
+def _is_resolved(val):
+    """
+    KRİTİK DÜZELTME: signals_log.csv'ye 'TRUE'/'FALSE' metni olarak
+    yazılıyor, ama pandas CSV'yi tekrar okurken bu sütunu otomatik olarak
+    Python bool'una çeviriyor (True/False). Eski kod hâlâ str(val)=='TRUE'
+    diye metinle karşılaştırıyordu -> bu KARŞILAŞTIRMA HİÇBİR ZAMAN True
+    OLMUYORDU, yani zaten kapanmış (TP/STOP olmuş) sinyaller her çalıştırmada
+    'hâlâ açık' sanılıp durmadan tekrar tekrar bildirim gönderiyordu.
+    Bu fonksiyon hem bool hem string hâlini doğru tanır.
+    """
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().upper() == "TRUE"
+
+
 def update_open_signals():
     print("⏳ Açık sinyaller kontrol ediliyor...")
     if not os.path.exists(LOG_FILE):
@@ -509,7 +528,7 @@ def update_open_signals():
     notify_msgs = []
 
     for idx, row in df.iterrows():
-        if str(row.get("resolved")) == "TRUE":
+        if _is_resolved(row.get("resolved")):
             continue
         try:
             symbol = row["symbol"]
@@ -566,8 +585,119 @@ def get_open_symbols():
         return set()
     if df.empty:
         return set()
-    open_rows = df[df["resolved"].astype(str) != "TRUE"]
+    open_rows = df[~df["resolved"].apply(_is_resolved)]
     return set(open_rows["symbol"].tolist())
+
+
+def _load_report_state():
+    if os.path.exists(REPORT_STATE_FILE):
+        try:
+            with open(REPORT_STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_report_state(state):
+    try:
+        with open(REPORT_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"Rapor state kayıt hatası: {e}")
+
+
+def build_daily_report():
+    """
+    YENİ: Dünkü (UTC) verilen sinyalleri, hâlâ devam edenleri, hedefe
+    ulaşanları ve stop olanları özetleyen günlük rapor metni üretir.
+    """
+    if not os.path.exists(LOG_FILE):
+        return "📊 *GÜNLÜK RAPOR*\nHenüz kayıtlı sinyal yok."
+
+    try:
+        df = pd.read_csv(LOG_FILE)
+    except Exception as e:
+        return f"📊 *GÜNLÜK RAPOR*\nLog okuma hatası: {e}"
+
+    if df.empty:
+        return "📊 *GÜNLÜK RAPOR*\nHenüz kayıtlı sinyal yok."
+
+    now = datetime.now(timezone.utc)
+    yesterday = (now - pd.Timedelta(days=1)).date()
+
+    df["ts"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+    df["is_resolved"] = df["resolved"].apply(_is_resolved)
+
+    # Dün açılmış sinyaller (tarihine göre)
+    yesterday_signals = df[df["ts"].dt.date == yesterday]
+    # Hâlâ devam eden TÜM sinyaller (ne zaman açıldığına bakılmaksızın)
+    ongoing = df[~df["is_resolved"]]
+    # Dün SONUÇLANMIŞ (TP/STOP/zaman aşımı) sinyaller
+    yesterday_resolved = yesterday_signals[yesterday_signals["is_resolved"]]
+
+    tp_rows = yesterday_resolved[yesterday_resolved["outcome"] == "HEDEF TUTTU"]
+    stop_rows = yesterday_resolved[yesterday_resolved["outcome"] == "STOP OLDU"]
+    timeout_rows = yesterday_resolved[yesterday_resolved["outcome"] == "ZAMAN ASIMI"]
+
+    lines = [f"📊 *GÜNLÜK RAPOR* — {yesterday.strftime('%d.%m.%Y')}\n"]
+
+    lines.append(f"🟢 *Devam Eden ({len(ongoing)}):*")
+    if len(ongoing) == 0:
+        lines.append("_yok_")
+    else:
+        for _, r in ongoing.iterrows():
+            lines.append(f"• `{r['symbol']}` entry: {r['entry_price']:.5f} R:R: {r.get('rr', '-')}")
+
+    lines.append(f"\n✅ *Hedef Tuttu, Dün ({len(tp_rows)}):*")
+    if len(tp_rows) == 0:
+        lines.append("_yok_")
+    else:
+        for _, r in tp_rows.iterrows():
+            lines.append(f"• `{r['symbol']}` %{r['outcome_pct']:.1f}")
+
+    lines.append(f"\n🛑 *Stop Oldu, Dün ({len(stop_rows)}):*")
+    if len(stop_rows) == 0:
+        lines.append("_yok_")
+    else:
+        for _, r in stop_rows.iterrows():
+            lines.append(f"• `{r['symbol']}` %{r['outcome_pct']:.1f}")
+
+    if len(timeout_rows) > 0:
+        lines.append(f"\n⏳ *Zaman Aşımı, Dün ({len(timeout_rows)}):*")
+        for _, r in timeout_rows.iterrows():
+            lines.append(f"• `{r['symbol']}`")
+
+    total_yesterday = len(yesterday_signals)
+    win_count = len(tp_rows)
+    resolved_count = len(yesterday_resolved)
+    if resolved_count > 0:
+        win_rate = (win_count / resolved_count) * 100
+        lines.append(f"\n📈 Dün açılan toplam: {total_yesterday} | Başarı oranı (sonuçlananlar içinde): %{win_rate:.0f}")
+
+    return "\n".join(lines)
+
+
+def maybe_send_daily_report():
+    """
+    YENİ: Günde SADECE BİR KEZ (DAILY_REPORT_HOUR_UTC saatinin ilk 15
+    dakikasında) günlük raporu gönderir. daily_report_state.json ile
+    aynı gün içinde ikinci kez gönderilmesi engellenir.
+    """
+    now = datetime.now(timezone.utc)
+    if now.hour != DAILY_REPORT_HOUR_UTC:
+        return
+
+    state = _load_report_state()
+    today_str = now.date().isoformat()
+    if state.get("last_report_date") == today_str:
+        return  # bugün zaten gönderildi
+
+    report = build_daily_report()
+    send_telegram_text(report)
+
+    state["last_report_date"] = today_str
+    _save_report_state(state)
 
 
 def log_signal(sig):
@@ -746,6 +876,7 @@ def main():
     print(f"🚀 Bot Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
 
     update_open_signals()
+    maybe_send_daily_report()
     btc_label, _ = get_btc_trend()
     oi_state = load_oi_state()
 
