@@ -105,7 +105,7 @@ def send_telegram_photo(photo_path, caption):
         with open(photo_path, 'rb') as photo:
             res = requests.post(url, data={"chat_id": CHAT_ID, "caption": caption,
                                             "parse_mode": "Markdown"},
-                               files={"photo": photo}, timeout=15)
+                                files={"photo": photo}, timeout=15)
         if res.status_code != 200:
             send_telegram_text(caption)
     except Exception as e:
@@ -136,9 +136,6 @@ def save_memory(memory_data):
 
 
 def update_and_compare_memory(symbol, current_ratio_val, current_direction, current_rsi, current_price):
-    """
-    Coin'in son taramadaki verileri ile şimdikileri karşılaştırıp trend değişimi üretir.
-    """
     memory = load_memory()
     prev_data = memory.get(symbol)
     
@@ -149,7 +146,6 @@ def update_and_compare_memory(symbol, current_ratio_val, current_direction, curr
         prev_ratio = prev_data.get("ratio_value", 1.0)
         prev_rsi = prev_data.get("rsi", 0)
         
-        # Alım-Satım Güç Değişimi Tespiti
         if current_direction == "buy" and (prev_dir != "buy" or current_ratio_val > prev_ratio):
             analysis_note = f"⚠️ *ALIM BASKISI ARTTI!* (Eski: {prev_ratio:.1f}x -> Yeni: {current_ratio_val:.1f}x)"
         elif current_direction == "sell" and (prev_dir != "sell" or current_ratio_val > prev_ratio):
@@ -159,11 +155,9 @@ def update_and_compare_memory(symbol, current_ratio_val, current_direction, curr
         else:
             analysis_note = f"➡️ *Akış Stabil* ({current_direction.upper()} {current_ratio_val:.1f}x)"
             
-        # RSI Sıkışma/Yükseliş Uyarısı
         if current_rsi > prev_rsi + 3:
             analysis_note += " | 📈 RSI Tırmanıyor"
     
-    # Hafızayı güncelle
     memory[symbol] = {
         "direction": current_direction,
         "ratio_value": current_ratio_val,
@@ -383,7 +377,7 @@ def get_funding_rate(symbol):
 
 def get_buy_sell_ratio(symbol):
     try:
-        trades = get_data("/api/v5/market/trades", {"instId": symbol, "limit": "500"})
+        trades = get_data("/api/v5/market/trades", {"instId": symbol, "limit": "100"})
         if not trades:
             return "Veri Yok", 1.0, "balanced"
 
@@ -430,7 +424,9 @@ def check_signal_status(symbol, entry_price, stop, target):
         current_close = float(last_closed['c'])
         current_high = float(last_closed['h'])
         current_low = float(last_closed['l'])
-        pct_move = (current_close / entry_price - 1) * 100
+        
+        # Short pozisyonunda kâr/zarar hesabı (fiyat düştükçe kâr artar)
+        pct_move = (1 - current_close / entry_price) * 100
 
         if current_high >= stop:
             return "STOPPED", pct_move
@@ -771,6 +767,7 @@ def score_candidate(c):
         score += 10
     if c.get("ratio_direction") == "sell":
         score += min(c.get("ratio_value", 1.0) * 2, 10)
+    
     # Alım baskısı artan coin'leri skorda geriye iterek riski azalt
     if "ALIM BASKISI ARTTI" in c.get("memory_note", ""):
         score -= 15
@@ -836,9 +833,10 @@ def main():
 
     send_telegram_text(raw_signals_msg)
 
-    # Tüm bulunan adayları takibe al
+    # Sadece yeni açılan (zaten takipte olmayan) sinyalleri logla
     for coin in candidates:
-        log_signal(coin)
+        if coin["symbol"] not in open_symbols:
+            log_signal(coin)
 
     # Gemini analizi + grafik: sadece en iyi skorlu aday
     fresh_candidates = [c for c in candidates if c["symbol"] not in open_symbols]
