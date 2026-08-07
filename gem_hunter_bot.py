@@ -648,11 +648,13 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 720})
-            page.goto(url, wait_until="networkidle")
-            page.wait_for_timeout(5000)
-            page.screenshot(path=output_path)
-            browser.close()
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 720})
+                page.goto(url, wait_until="networkidle", timeout=20000)
+                page.wait_for_timeout(3000)
+                page.screenshot(path=output_path)
+            finally:
+                browser.close()
         return os.path.exists(output_path)
     except Exception as e:
         print(f"Grafik görüntüsü alınamadı ({tv_symbol}): {e}")
@@ -780,11 +782,13 @@ def score_candidate(c):
 def main():
     print(f"🚀 Gem Hunter Botu Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
 
+    # 1. Açık sinyalleri ve günlük rapor durumunu kontrol et
     update_open_signals()
     maybe_send_daily_report()
 
     btc_label, _ = get_btc_trend()
 
+    # 2. Aday taramasını çalıştır
     candidates = get_market_candidates()
     if not candidates:
         print("📭 Bu tarama döngüsünde kriterlere uyan aday bulunamadı.")
@@ -792,9 +796,12 @@ def main():
 
     open_symbols = get_open_symbols()
 
-    raw_signals_msg = "🔍 *PİYASA TARAMA SONUÇLARI*\n"
-    raw_signals_msg += f"🌐 *BTC:* {btc_label}\n"
-    raw_signals_msg += "───────────────────────\n\n"
+    # 3. Tüm aday analiz verilerini hazırla ve mesaj bloğunu kur
+    msg_lines = [
+        "🔍 *PİYASA TARAMA SONUÇLARI*",
+        f"🌐 *BTC:* {btc_label}",
+        "───────────────────────\n"
+    ]
 
     for coin in candidates:
         symbol = coin["symbol"]
@@ -820,7 +827,7 @@ def main():
         vol_label = coin["vol_anomaly"] if coin["vol_anomaly"] else "Yok"
         pozisyon_notu = " (📌 açık pozisyon var)" if symbol in open_symbols else ""
 
-        raw_signals_msg += (
+        msg_lines.append(
             f"🚨 *{symbol}*{pozisyon_notu}\n"
             f"24s: %{coin['chg']:.1f} | RSI: {coin['rsi']:.1f}\n"
             f"Entry: {coin['entry']:.5f} | Stop: {coin['stop']:.5f} | Hedef: {coin['target']:.5f} | R:R: {coin['rr']}\n"
@@ -828,44 +835,49 @@ def main():
             f"Hacim: {vol_label} | Funding: {funding_raw} {fl_label}\n"
             f"Alım/Satım: {ratio_label}\n"
             f"🧠 *Hafıza & Akış:* {memory_note}\n"
-            f"───────────────────────\n\n"
+            f"───────────────────────\n"
         )
 
-    send_telegram_text(raw_signals_msg)
+    # Genel tarama özeti mesajını Telegram'a ilet
+    send_telegram_text("\n".join(msg_lines))
 
-    # Sadece yeni açılan (zaten takipte olmayan) sinyalleri logla
-    for coin in candidates:
-        if coin["symbol"] not in open_symbols:
-            log_signal(coin)
-
-    # Gemini analizi + grafik: sadece en iyi skorlu aday
+    # 4. En yüksek skorlu aday (Alfa Seçimi) tespiti
     fresh_candidates = [c for c in candidates if c["symbol"] not in open_symbols]
     pool = fresh_candidates if fresh_candidates else candidates
     best = max(pool, key=lambda c: c["score"])
 
+    # 5. Yalnızca seçilen ALFA adayı (eğer yeni bir sinyal ise) log dosyasına kaydet
+    if best["symbol"] not in open_symbols:
+        log_signal(best)
+
+    # 6. Alfa seçimi için grafik alma ve Gemini doğrulaması
     img_path = f"{best['symbol'].split('-')[0]}_chart.png"
     tv_symbol = best['symbol'].replace("-SWAP", "").replace("-", "")
-    got_chart = take_tradingview_screenshot(tv_symbol, img_path)
-    best["img_path"] = img_path if got_chart else None
+    
+    try:
+        got_chart = take_tradingview_screenshot(tv_symbol, img_path)
+        best["img_path"] = img_path if got_chart else None
 
-    gemini_report = analyze_top_signal_with_gemini(best, btc_label)
+        gemini_report = analyze_top_signal_with_gemini(best, btc_label)
 
-    if gemini_report:
-        caption = f"👑 *ALFA SEÇİMİ: {best['symbol']}*\n\n{gemini_report}"
-        if best["img_path"]:
-            send_telegram_photo(best["img_path"], caption)
-        else:
-            send_telegram_text(caption)
-    elif not GEMINI_API_KEY:
-        pass
-    else:
-        send_telegram_text(f"⚠️ {best['symbol']} için Gemini analizi alınamadı.")
-
-    if img_path and os.path.exists(img_path):
-        try:
-            os.remove(img_path)
-        except Exception:
+        if gemini_report:
+            caption = f"👑 *ALFA SEÇİMİ: {best['symbol']}*\n\n{gemini_report}"
+            if best["img_path"]:
+                send_telegram_photo(best["img_path"], caption)
+            else:
+                send_telegram_text(caption)
+        elif not GEMINI_API_KEY:
             pass
+        else:
+            send_telegram_text(f"⚠️ {best['symbol']} için Gemini analizi alınamadı.")
+
+    finally:
+        # Görsel dosyasının kalıntısını temizle
+        if img_path and os.path.exists(img_path):
+            try:
+                os.remove(img_path)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
