@@ -464,6 +464,10 @@ def update_open_signals():
     if df.empty:
         return
 
+    # resolved kolonu bazı pandas sürümlerinde otomatik bool'a çevrilebiliyor;
+    # sonraki string atamalarında hataya yol açmaması için object/string'e zorla
+    df["resolved"] = df["resolved"].astype(str)
+
     now = datetime.now(timezone.utc)
     updated = False
     notify_msgs = []
@@ -520,6 +524,7 @@ def get_open_symbols():
         return set()
     if df.empty:
         return set()
+    df["resolved"] = df["resolved"].astype(str)
     open_rows = df[~df["resolved"].apply(_is_resolved)]
     return set(open_rows["symbol"].tolist())
 
@@ -573,6 +578,10 @@ def monitor_open_positions_flow():
 
     if df.empty:
         return
+
+    # resolved kolonu bazı pandas sürümlerinde otomatik bool'a çevrilebiliyor;
+    # sonraki string atamalarında hataya yol açmaması için object/string'e zorla
+    df["resolved"] = df["resolved"].astype(str)
 
     # Eski satırlarda bu kolonlar olmayabilir -- yoksa varsayılanla oluştur
     if "last_ratio_value" not in df.columns:
@@ -668,6 +677,7 @@ def build_daily_report():
     yesterday = (now - pd.Timedelta(days=1)).date()
 
     df["ts"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+    df["resolved"] = df["resolved"].astype(str)
     df["is_resolved"] = df["resolved"].apply(_is_resolved)
 
     yesterday_signals = df[df["ts"].dt.date == yesterday]
