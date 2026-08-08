@@ -34,6 +34,10 @@ REPORT_STATE_FILE = "daily_report_state.json"
 # --- Alım/Satım oran eşiği ---
 RATIO_NOTABLE = 1.15          # bu oranın altı "Dengeli" sayılır
 
+# --- Açık pozisyon (short) alıcı baskısı uyarı eşiği ---
+BUY_PRESSURE_ALERT_RATIO = 1.3    # bu oranın üzerinde alım fazlası -> uyarı
+BUY_PRESSURE_INCREASE_MULT = 1.1  # önceki orana göre %10+ artış -> "artıyor" uyarısı
+
 
 # =========================================================
 # TELEGRAM BİLDİRİM FONKSİYONLARI
@@ -138,14 +142,14 @@ def save_memory(memory_data):
 def update_and_compare_memory(symbol, current_ratio_val, current_direction, current_rsi, current_price):
     memory = load_memory()
     prev_data = memory.get(symbol)
-    
+
     analysis_note = "🆕 İlk Kez Taranıyor"
-    
+
     if prev_data:
         prev_dir = prev_data.get("direction", "balanced")
         prev_ratio = prev_data.get("ratio_value", 1.0)
         prev_rsi = prev_data.get("rsi", 0)
-        
+
         if current_direction == "buy" and (prev_dir != "buy" or current_ratio_val > prev_ratio):
             analysis_note = f"⚠️ *ALIM BASKISI ARTTI!* (Eski: {prev_ratio:.1f}x -> Yeni: {current_ratio_val:.1f}x)"
         elif current_direction == "sell" and (prev_dir != "sell" or current_ratio_val > prev_ratio):
@@ -154,10 +158,10 @@ def update_and_compare_memory(symbol, current_ratio_val, current_direction, curr
             analysis_note = f"⚖️ *Hacim Dengelendi* (Önceki baskı azaldı)"
         else:
             analysis_note = f"➡️ *Akış Stabil* ({current_direction.upper()} {current_ratio_val:.1f}x)"
-            
+
         if current_rsi > prev_rsi + 3:
             analysis_note += " | 📈 RSI Tırmanıyor"
-    
+
     memory[symbol] = {
         "direction": current_direction,
         "ratio_value": current_ratio_val,
@@ -166,7 +170,7 @@ def update_and_compare_memory(symbol, current_ratio_val, current_direction, curr
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
     save_memory(memory)
-    
+
     return analysis_note
 
 
@@ -424,7 +428,7 @@ def check_signal_status(symbol, entry_price, stop, target):
         current_close = float(last_closed['c'])
         current_high = float(last_closed['h'])
         current_low = float(last_closed['l'])
-        
+
         # Short pozisyonunda kâr/zarar hesabı (fiyat düştükçe kâr artar)
         pct_move = (1 - current_close / entry_price) * 100
 
@@ -531,6 +535,9 @@ def log_signal(sig):
         "resolved": "FALSE",
         "outcome": "",
         "outcome_pct": "",
+        # Açık pozisyon hacim takibi için başlangıç değerleri
+        "last_ratio_value": 1.0,
+        "last_ratio_direction": "balanced",
     }
     file_exists = os.path.exists(LOG_FILE)
     df_row = pd.DataFrame([row])
@@ -538,6 +545,77 @@ def log_signal(sig):
         df_row.to_csv(LOG_FILE, mode="a", header=False, index=False)
     else:
         df_row.to_csv(LOG_FILE, mode="w", header=True, index=False)
+
+
+# =========================================================
+# AÇIK POZİSYON HACİM (ALICI BASKISI) İZLEME
+# =========================================================
+def monitor_open_positions_flow():
+    """
+    Açık (henüz resolve olmamış) short sinyallerinin anlık alım/satım oranını
+    kontrol eder. Bu kontrol, tarama filtrelerinden (RSI, %24s değişim vb.)
+    bağımsızdır -- yani coin artık "aday" listesinden düşmüş olsa bile
+    pozisyon açık kaldığı sürece izlenmeye devam eder.
+
+    State, signals_log.csv dosyasındaki last_ratio_value / last_ratio_direction
+    kolonlarında tutulur -- ayrı bir dosyaya gerek yoktur.
+    """
+    print("🔎 Açık pozisyonlarda alım/satım akışı kontrol ediliyor...")
+    if not os.path.exists(LOG_FILE):
+        return
+
+    try:
+        df = pd.read_csv(LOG_FILE)
+    except Exception as e:
+        print(f"Log okuma hatası (monitor): {e}")
+        return
+
+    if df.empty:
+        return
+
+    # Eski satırlarda bu kolonlar olmayabilir -- yoksa varsayılanla oluştur
+    if "last_ratio_value" not in df.columns:
+        df["last_ratio_value"] = 1.0
+    if "last_ratio_direction" not in df.columns:
+        df["last_ratio_direction"] = "balanced"
+
+    updated = False
+
+    for idx, row in df.iterrows():
+        if _is_resolved(row.get("resolved")):
+            continue
+
+        symbol = row["symbol"]
+        try:
+            ratio_label, ratio_value, direction = get_buy_sell_ratio(symbol)
+        except Exception as e:
+            print(f"Akış kontrol hatası ({symbol}): {e}")
+            continue
+
+        prev_ratio = row.get("last_ratio_value", 1.0)
+        prev_ratio = float(prev_ratio) if pd.notna(prev_ratio) else 1.0
+        prev_direction = row.get("last_ratio_direction", "balanced")
+        if pd.isna(prev_direction):
+            prev_direction = "balanced"
+
+        if direction == "buy" and ratio_value >= BUY_PRESSURE_ALERT_RATIO:
+            if prev_direction != "buy":
+                send_telegram_text(
+                    f"⚠️ *ALICI BASKISI BAŞLADI:* `{symbol}` (açık SHORT pozisyonun)\n"
+                    f"Oran: {ratio_value:.1f}x alım fazlası. Pozisyonu gözden geçir."
+                )
+            elif ratio_value > prev_ratio * BUY_PRESSURE_INCREASE_MULT:
+                send_telegram_text(
+                    f"🚨 *ALICI BASKISI ARTIYOR:* `{symbol}` (açık SHORT pozisyonun)\n"
+                    f"Önceki: {prev_ratio:.1f}x -> Şimdi: {ratio_value:.1f}x. Riskli, dikkatli ol!"
+                )
+
+        df.at[idx, "last_ratio_value"] = ratio_value
+        df.at[idx, "last_ratio_direction"] = direction
+        updated = True
+
+    if updated:
+        df.to_csv(LOG_FILE, index=False)
 
 
 # --- Günlük rapor ---
@@ -769,7 +847,7 @@ def score_candidate(c):
         score += 10
     if c.get("ratio_direction") == "sell":
         score += min(c.get("ratio_value", 1.0) * 2, 10)
-    
+
     # Alım baskısı artan coin'leri skorda geriye iterek riski azalt
     if "ALIM BASKISI ARTTI" in c.get("memory_note", ""):
         score -= 15
@@ -782,8 +860,9 @@ def score_candidate(c):
 def main():
     print(f"🚀 Gem Hunter Botu Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
 
-    # 1. Açık sinyalleri ve günlük rapor durumunu kontrol et
+    # 1. Açık sinyalleri, açık pozisyon hacim akışını ve günlük rapor durumunu kontrol et
     update_open_signals()
+    monitor_open_positions_flow()
     maybe_send_daily_report()
 
     btc_label, _ = get_btc_trend()
@@ -809,7 +888,7 @@ def main():
         trigger_label, confirm_count = check_candle_trigger_15m(symbol)
         funding_raw, fl_label = get_funding_rate(symbol)
         ratio_label, ratio_value, ratio_direction = get_buy_sell_ratio(symbol)
-        
+
         # Hafıza mekanizmasını çalıştır ve karşılaştırma yap
         memory_note = update_and_compare_memory(
             symbol, ratio_value, ratio_direction, coin["rsi"], coin["current_price"]
@@ -853,7 +932,7 @@ def main():
     # 6. Alfa seçimi için grafik alma ve Gemini doğrulaması
     img_path = f"{best['symbol'].split('-')[0]}_chart.png"
     tv_symbol = best['symbol'].replace("-SWAP", "").replace("-", "")
-    
+
     try:
         got_chart = take_tradingview_screenshot(tv_symbol, img_path)
         best["img_path"] = img_path if got_chart else None
