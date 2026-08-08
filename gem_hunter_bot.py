@@ -37,6 +37,7 @@ RATIO_NOTABLE = 1.15          # bu oranın altı "Dengeli" sayılır
 # --- Açık pozisyon (short) alıcı baskısı uyarı eşiği ---
 BUY_PRESSURE_ALERT_RATIO = 1.3    # bu oranın üzerinde alım fazlası -> uyarı
 BUY_PRESSURE_INCREASE_MULT = 1.1  # önceki orana göre %10+ artış -> "artıyor" uyarısı
+FLOW_MONITOR_MAX_AGE_HOURS = 24   # bu yaştan eski açık sinyaller izlenmez/uyarılmaz
 
 
 # =========================================================
@@ -580,9 +581,23 @@ def monitor_open_positions_flow():
         df["last_ratio_direction"] = "balanced"
 
     updated = False
+    now = datetime.now(timezone.utc)
 
     for idx, row in df.iterrows():
         if _is_resolved(row.get("resolved")):
+            continue
+
+        # 24 saatten eski açık sinyalleri hiç kontrol etme -- eski backlog
+        # birikip her çalıştırmada spam atmasın diye
+        try:
+            ts = pd.to_datetime(row["timestamp_utc"])
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            age_hours = (now - ts).total_seconds() / 3600
+        except Exception:
+            age_hours = 0
+
+        if age_hours > FLOW_MONITOR_MAX_AGE_HOURS:
             continue
 
         symbol = row["symbol"]
