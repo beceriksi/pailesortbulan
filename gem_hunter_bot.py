@@ -19,7 +19,6 @@ RSI_LIMIT = 70
 CHANGE_24H_LIMIT = 8
 PIVOT_LEN = 2                 # destek/direnç: önce/sonrasındaki 2 muma göre tepe/dip
 LOG_FILE = "signals_log.csv"
-MEMORY_FILE = "market_memory.json"  # Botun hafıza dosyası
 MAX_PENDING_HOURS = 12
 
 # --- Risk yönetimi (R:R hesabı) ---
@@ -119,60 +118,38 @@ def send_telegram_photo(photo_path, caption):
 
 
 # =========================================================
-# HAFIZA (MEMORY) YÖNETİMİ
+# HAFIZA (MEMORY) YÖNETİMİ - KALICI CSV TABANLI
 # =========================================================
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Hafıza okuma hatası: {e}")
-            return {}
-    return {}
+def get_memory_from_log(symbol, current_ratio_val, current_direction):
+    """
+    Geçici json yerine hafızayı doğrudan signals_log.csv dosyasından okur.
+    Böylece GitHub Actions vb. ortamlarda hafıza sıfırlanmaz.
+    """
+    if not os.path.exists(LOG_FILE):
+        return "🆕 İlk Kez Taranıyor"
 
-
-def save_memory(memory_data):
     try:
-        with open(MEMORY_FILE, "w") as f:
-            json.dump(memory_data, f, indent=2)
-    except Exception as e:
-        print(f"Hafıza kaydetme hatası: {e}")
+        df = pd.read_csv(LOG_FILE)
+        symbol_rows = df[df["symbol"] == symbol]
+        
+        if symbol_rows.empty:
+            return "🆕 İlk Kez Taranıyor"
 
-
-def update_and_compare_memory(symbol, current_ratio_val, current_direction, current_rsi, current_price):
-    memory = load_memory()
-    prev_data = memory.get(symbol)
-
-    analysis_note = "🆕 İlk Kez Taranıyor"
-
-    if prev_data:
-        prev_dir = prev_data.get("direction", "balanced")
-        prev_ratio = prev_data.get("ratio_value", 1.0)
-        prev_rsi = prev_data.get("rsi", 0)
+        last_row = symbol_rows.iloc[-1]
+        prev_ratio = float(last_row.get("last_ratio_value", 1.0))
+        prev_dir = str(last_row.get("last_ratio_direction", "balanced"))
 
         if current_direction == "buy" and (prev_dir != "buy" or current_ratio_val > prev_ratio):
-            analysis_note = f"⚠️ *ALIM BASKISI ARTTI!* (Eski: {prev_ratio:.1f}x -> Yeni: {current_ratio_val:.1f}x)"
+            return f"⚠️ *ALIM BASKISI ARTTI* ({prev_ratio:.1f}x ➔ {current_ratio_val:.1f}x)"
         elif current_direction == "sell" and (prev_dir != "sell" or current_ratio_val > prev_ratio):
-            analysis_note = f"🔥 *SATIM BASKISI ARTTI* (Short Uygun - Eski: {prev_ratio:.1f}x -> Yeni: {current_ratio_val:.1f}x)"
+            return f"🔥 *SATIM BASKISI ARTTI* ({prev_ratio:.1f}x ➔ {current_ratio_val:.1f}x)"
         elif current_direction == "balanced" and prev_dir != "balanced":
-            analysis_note = f"⚖️ *Hacim Dengelendi* (Önceki baskı azaldı)"
+            return "⚖️ *Hacim Dengelendi*"
         else:
-            analysis_note = f"➡️ *Akış Stabil* ({current_direction.upper()} {current_ratio_val:.1f}x)"
+            return f"➡️ Akış Stabil ({current_ratio_val:.1f}x {current_direction.upper()})"
 
-        if current_rsi > prev_rsi + 3:
-            analysis_note += " | 📈 RSI Tırmanıyor"
-
-    memory[symbol] = {
-        "direction": current_direction,
-        "ratio_value": current_ratio_val,
-        "rsi": current_rsi,
-        "price": current_price,
-        "updated_at": datetime.now(timezone.utc).isoformat()
-    }
-    save_memory(memory)
-
-    return analysis_note
+    except Exception as e:
+        return "➡️ Akış Takip Ediliyor"
 
 
 # =========================================================
@@ -229,6 +206,53 @@ def calc_rsi_series(close):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss.replace(0, 0.0001)
     return 100 - (100 / (1 + rs))
+
+
+# --- STRATEJİK İYİLEŞTİRME: ÜST FİTİL REDDİ (B) ---
+def check_upper_wick_rejection(df_1h, min_wick_ratio=0.25):
+    """
+    Son 1 saatlik mumda satıcı baskısını (üst fitil) kontrol eder.
+    En az %25 üst fitil bırakmamışsa tepeden red yememiştir.
+    """
+    if df_1h is None or df_1h.empty:
+        return False, "Veri Yok"
+
+    last = df_1h.iloc[-1]
+    o, h, l, c = float(last['o']), float(last['h']), float(last['l']), float(last['c'])
+    total_range = h - l
+
+    if total_range == 0:
+        return False, "Sıfır Aralık"
+
+    upper_wick = h - max(o, c)
+    wick_ratio = upper_wick / total_range
+
+    if wick_ratio >= min_wick_ratio:
+        return True, f"🎯 Satıcı Reddi (%{int(wick_ratio*100)} İğne)"
+    
+    return False, f"❌ İğne Yetersiz (%{int(wick_ratio*100)})"
+
+
+# --- STRATEJİK İYİLEŞTİRME: HACİM TÜKENMESİ (C) ---
+def check_volume_exhaustion(df_1h):
+    """
+    Son 2 mumun ortalama hacmini, önceki 10 mumun ortalamasıyla kıyaslar.
+    Hacim düşüyorsa alıcıların tükenmeye başladığını onaylar.
+    """
+    if df_1h is None or len(df_1h) < 12:
+        return True, "Hacim Verisi Yetersiz"
+
+    recent_vol = df_1h['v'].iloc[-2:].mean()
+    prev_vol = df_1h['v'].iloc[-12:-2].mean()
+
+    if prev_vol == 0:
+        return True, "Hacim Normal"
+
+    if recent_vol < prev_vol:
+        drop_pct = int((1 - recent_vol / prev_vol) * 100)
+        return True, f"📉 Hacim Tükenmesi (-%{drop_pct})"
+    
+    return False, "⚠️ Hacim Halen Yüksek"
 
 
 def check_rsi_price_divergence(df):
@@ -430,7 +454,6 @@ def check_signal_status(symbol, entry_price, stop, target):
         current_high = float(last_closed['h'])
         current_low = float(last_closed['l'])
 
-        # Short pozisyonunda kâr/zarar hesabı (fiyat düştükçe kâr artar)
         pct_move = (1 - current_close / entry_price) * 100
 
         if current_high >= stop:
@@ -464,10 +487,7 @@ def update_open_signals():
     if df.empty:
         return
 
-    # resolved kolonu bazı pandas sürümlerinde otomatik bool'a çevrilebiliyor;
-    # sonraki string atamalarında hataya yol açmaması için object/string'e zorla
     df["resolved"] = df["resolved"].astype(str)
-
     now = datetime.now(timezone.utc)
     updated = False
     notify_msgs = []
@@ -541,9 +561,8 @@ def log_signal(sig):
         "resolved": "FALSE",
         "outcome": "",
         "outcome_pct": "",
-        # Açık pozisyon hacim takibi için başlangıç değerleri
-        "last_ratio_value": 1.0,
-        "last_ratio_direction": "balanced",
+        "last_ratio_value": sig.get("ratio_value", 1.0),
+        "last_ratio_direction": sig.get("ratio_direction", "balanced"),
     }
     file_exists = os.path.exists(LOG_FILE)
     df_row = pd.DataFrame([row])
@@ -553,19 +572,7 @@ def log_signal(sig):
         df_row.to_csv(LOG_FILE, mode="w", header=True, index=False)
 
 
-# =========================================================
-# AÇIK POZİSYON HACİM (ALICI BASKISI) İZLEME
-# =========================================================
 def monitor_open_positions_flow():
-    """
-    Açık (henüz resolve olmamış) short sinyallerinin anlık alım/satım oranını
-    kontrol eder. Bu kontrol, tarama filtrelerinden (RSI, %24s değişim vb.)
-    bağımsızdır -- yani coin artık "aday" listesinden düşmüş olsa bile
-    pozisyon açık kaldığı sürece izlenmeye devam eder.
-
-    State, signals_log.csv dosyasındaki last_ratio_value / last_ratio_direction
-    kolonlarında tutulur -- ayrı bir dosyaya gerek yoktur.
-    """
     print("🔎 Açık pozisyonlarda alım/satım akışı kontrol ediliyor...")
     if not os.path.exists(LOG_FILE):
         return
@@ -579,11 +586,8 @@ def monitor_open_positions_flow():
     if df.empty:
         return
 
-    # resolved kolonu bazı pandas sürümlerinde otomatik bool'a çevrilebiliyor;
-    # sonraki string atamalarında hataya yol açmaması için object/string'e zorla
     df["resolved"] = df["resolved"].astype(str)
 
-    # Eski satırlarda bu kolonlar olmayabilir -- yoksa varsayılanla oluştur
     if "last_ratio_value" not in df.columns:
         df["last_ratio_value"] = 1.0
     if "last_ratio_direction" not in df.columns:
@@ -596,8 +600,6 @@ def monitor_open_positions_flow():
         if _is_resolved(row.get("resolved")):
             continue
 
-        # 24 saatten eski açık sinyalleri hiç kontrol etme -- eski backlog
-        # birikip her çalıştırmada spam atmasın diye
         try:
             ts = pd.to_datetime(row["timestamp_utc"])
             if ts.tzinfo is None:
@@ -642,7 +644,7 @@ def monitor_open_positions_flow():
         df.to_csv(LOG_FILE, index=False)
 
 
-# --- Günlük rapor ---
+# --- Günlük Rapor ---
 def _load_report_state():
     if os.path.exists(REPORT_STATE_FILE):
         try:
@@ -780,6 +782,8 @@ Coin: {sig['symbol']}
 RSI: {sig['rsi']:.1f} | Funding: {sig['funding']} {sig['fl_flag']}
 Alım/Satım Oranı: {sig['ratio_label']}
 Hafıza/Akış Durumu: {sig['memory_note']}
+Satıcı Baskısı (Fitil): {sig['wick_label']}
+Hacim Durumu: {sig['vol_exhaust_label']}
 
 Sadece şu şablonla, en fazla 3 madde, kısa cümlelerle cevap ver:
 🤖 *Gemini Görüşü:* [ONAYLIYORUM / TEREDDÜTLÜYÜM / KATILMIYORUM]
@@ -833,6 +837,14 @@ def get_market_candidates():
         if last_rsi < RSI_LIMIT and vol_div == "":
             continue
 
+        # --- YENİ EKLENEN STRATEJİK FİLTRELER (B ve C) ---
+        has_wick, wick_label = check_upper_wick_rejection(df)
+        has_vol_exhaust, vol_exhaust_label = check_volume_exhaustion(df)
+
+        # Tepede satıcı reddi (iğne) yoksa veya hacim tükenmemişse stop olmamak için ELE
+        if not has_wick or not has_vol_exhaust:
+            continue
+
         resistance = find_valid_resistance(df, current_price)
         if resistance is None:
             continue
@@ -854,6 +866,8 @@ def get_market_candidates():
             "vol_anomaly": vol_div,
             "df_1h": df,
             "current_price": current_price,
+            "wick_label": wick_label,
+            "vol_exhaust_label": vol_exhaust_label,
             **levels,
         })
 
@@ -873,7 +887,6 @@ def score_candidate(c):
     if c.get("ratio_direction") == "sell":
         score += min(c.get("ratio_value", 1.0) * 2, 10)
 
-    # Alım baskısı artan coin'leri skorda geriye iterek riski azalt
     if "ALIM BASKISI ARTTI" in c.get("memory_note", ""):
         score -= 15
     return score
@@ -885,14 +898,14 @@ def score_candidate(c):
 def main():
     print(f"🚀 Gem Hunter Botu Başlatıldı: {datetime.now(timezone.utc).isoformat()} UTC")
 
-    # 1. Açık sinyalleri, açık pozisyon hacim akışını ve günlük rapor durumunu kontrol et
+    # 1. Kontroller
     update_open_signals()
     monitor_open_positions_flow()
     maybe_send_daily_report()
 
     btc_label, _ = get_btc_trend()
 
-    # 2. Aday taramasını çalıştır
+    # 2. Aday taraması
     candidates = get_market_candidates()
     if not candidates:
         print("📭 Bu tarama döngüsünde kriterlere uyan aday bulunamadı.")
@@ -900,7 +913,7 @@ def main():
 
     open_symbols = get_open_symbols()
 
-    # 3. Tüm aday analiz verilerini hazırla ve mesaj bloğunu kur
+    # 3. Mesaj Bloğu Kurulumu
     msg_lines = [
         "🔍 *PİYASA TARAMA SONUÇLARI*",
         f"🌐 *BTC:* {btc_label}",
@@ -914,10 +927,8 @@ def main():
         funding_raw, fl_label = get_funding_rate(symbol)
         ratio_label, ratio_value, ratio_direction = get_buy_sell_ratio(symbol)
 
-        # Hafıza mekanizmasını çalıştır ve karşılaştırma yap
-        memory_note = update_and_compare_memory(
-            symbol, ratio_value, ratio_direction, coin["rsi"], coin["current_price"]
-        )
+        # CSV tabanlı stabil hafıza sorgusu
+        memory_note = get_memory_from_log(symbol, ratio_value, ratio_direction)
 
         coin.update({
             "div_label": div_label, "has_div": has_div,
@@ -936,25 +947,26 @@ def main():
             f"24s: %{coin['chg']:.1f} | RSI: {coin['rsi']:.1f}\n"
             f"Entry: {coin['entry']:.5f} | Stop: {coin['stop']:.5f} | Hedef: {coin['target']:.5f} | R:R: {coin['rr']}\n"
             f"15m Teyit: {trigger_label} | Uyumsuzluk: {div_label}\n"
+            f"Satıcı Reddi: {coin['wick_label']} | {coin['vol_exhaust_label']}\n"
             f"Hacim: {vol_label} | Funding: {funding_raw} {fl_label}\n"
             f"Alım/Satım: {ratio_label}\n"
             f"🧠 *Hafıza & Akış:* {memory_note}\n"
             f"───────────────────────\n"
         )
 
-    # Genel tarama özeti mesajını Telegram'a ilet
+    # Özet mesajı at
     send_telegram_text("\n".join(msg_lines))
 
-    # 4. En yüksek skorlu aday (Alfa Seçimi) tespiti
+    # 4. Alfa Seçimi
     fresh_candidates = [c for c in candidates if c["symbol"] not in open_symbols]
     pool = fresh_candidates if fresh_candidates else candidates
     best = max(pool, key=lambda c: c["score"])
 
-    # 5. Yalnızca seçilen ALFA adayı (eğer yeni bir sinyal ise) log dosyasına kaydet
+    # 5. Sadece yeni sinyali kaydet
     if best["symbol"] not in open_symbols:
         log_signal(best)
 
-    # 6. Alfa seçimi için grafik alma ve Gemini doğrulaması
+    # 6. Grafik & Gemini Analizi
     img_path = f"{best['symbol'].split('-')[0]}_chart.png"
     tv_symbol = best['symbol'].replace("-SWAP", "").replace("-", "")
 
@@ -976,7 +988,6 @@ def main():
             send_telegram_text(f"⚠️ {best['symbol']} için Gemini analizi alınamadı.")
 
     finally:
-        # Görsel dosyasının kalıntısını temizle
         if img_path and os.path.exists(img_path):
             try:
                 os.remove(img_path)
