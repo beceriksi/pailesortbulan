@@ -152,8 +152,49 @@ def get_data(endpoint, params=None):
 
 
 # =========================================================
-# TEKNİK ANALİZ MODÜLLERİ VE FİLTRELER
+# TEKNİK ANALİZ MODÜLLERİ VE TAZE KIRILIM FİLTRESİ
 # =========================================================
+def check_fresh_breakout_or_resistance(df, pivot_len=PIVOT_LEN):
+  """Çoktan kırılmış bayat dirençleri eler.
+
+  Sadece aktif kırılmamış direnci ya da SON MUMDA yeni gerçekleşen kırılımı
+  döndürür.
+  """
+  if len(df) < (pivot_len * 2 + 1):
+    return df['h'].max(), False, 'Yetersiz Veri'
+
+  highs = df['h'].astype(float).values
+  closes = df['c'].astype(float).values
+
+  p_highs = []
+  p_indices = []
+  for i in range(pivot_len, len(highs) - pivot_len):
+    if all(
+        highs[i] > highs[i - j] for j in range(1, pivot_len + 1)
+    ) and all(highs[i] > highs[i + j] for j in range(1, pivot_len + 1)):
+      p_highs.append(highs[i])
+      p_indices.append(i)
+
+  if not p_highs:
+    return df['h'].max(), False, 'Geçmiş Tepe'
+
+  last_close = closes[-1]
+  prev_close = closes[-2]
+
+  # Sondan başa doğru dirençleri tarıyoruz
+  for res_price, idx in zip(reversed(p_highs), reversed(p_indices)):
+    # 1. TAZE KIRILIM: Bir önceki mum direnç altındaydı, son mum üstüne çıktı!
+    if prev_close <= res_price and last_close > res_price:
+      return res_price, True, '🚨 YENİ KIRILIM (Son Mumda Kırıldı!)'
+
+    # 2. AKTİF DİRENÇ: Fiyat henüz bu direnci kırmadı
+    if last_close < res_price:
+      return res_price, False, 'Aktif Direnç'
+
+  # Tüm pivotlar kırıldıysa grafik en yüksek seviyelerindedir
+  return max(p_highs), False, 'Tüm Pivotlar Kırılmış'
+
+
 def get_btc_trend():
   try:
     c_1h = get_data(
@@ -239,24 +280,6 @@ def check_rsi_price_divergence(df):
   except Exception as e:
     print(f'Divergence hesap hatası: {e}')
     return 'Hesaplama Hatası', False
-
-
-def find_custom_sr(df, pivot_len=PIVOT_LEN):
-  if len(df) < (pivot_len * 2 + 1):
-    return [], []
-  highs = df['h'].astype(float).values
-  lows = df['l'].astype(float).values
-  p_highs, p_lows = [], []
-  for i in range(pivot_len, len(highs) - pivot_len):
-    if all(
-        highs[i] > highs[i - j] for j in range(1, pivot_len + 1)
-    ) and all(highs[i] > highs[i + j] for j in range(1, pivot_len + 1)):
-      p_highs.append(highs[i])
-    if all(lows[i] < lows[i - j] for j in range(1, pivot_len + 1)) and all(
-        lows[i] < lows[i + j] for j in range(1, pivot_len + 1)
-    ):
-      p_lows.append(lows[i])
-  return p_highs, p_lows
 
 
 def check_volume_divergence(df):
@@ -419,7 +442,6 @@ def check_signal_status(symbol, entry_price, entry_rsi, res_1h):
     l = (-delta.where(delta < 0, 0)).rolling(14).mean()
     last_g, last_l = g.iloc[-2], l.iloc[-2]
 
-    # RSI Sıfıra bölünme koruması
     if last_l == 0:
       current_rsi = 100.0
     else:
@@ -606,7 +628,7 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
 
 
 # =========================================================
-# HIZLANDIRILMIŞ VE OPTİMİZE EDİLMİŞ MARKET TARAMA
+# MARKET TARAMA VE FİLTRELEME
 # =========================================================
 def get_market_candidates():
   print('🌐 OKX Borsasındaki aktif vadeli işlem pariteleri taranıyor...')
@@ -656,6 +678,16 @@ def get_market_candidates():
     df['h'] = df['h'].astype(float)
     df['l'] = df['l'].astype(float)
 
+    # TAZE KIRILIM / AKTİF DİRENÇ KONTROLÜ
+    res_1h, is_fresh_breakout, breakout_status = (
+        check_fresh_breakout_or_resistance(df)
+    )
+
+    # Filtre: Fiyat direnci çoktan kırıp üzerine yerleştiyse ve bu yeni bir kırılım değilse ES GEÇ!
+    last_close = df['c'].iloc[-1]
+    if not is_fresh_breakout and last_close > res_1h * 1.005:
+      continue
+
     delta = df['c'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -666,11 +698,7 @@ def get_market_candidates():
     vol_div = check_volume_divergence(df)
     has_vol_anomaly = vol_div != ''
 
-    if last_rsi >= RSI_LIMIT or has_vol_anomaly:
-      p_highs, p_lows = find_custom_sr(df)
-      res_1h = p_highs[-1] if p_highs else (df['h'].max())
-
-      # Trend ve Pivot S/R Notları Hesaplama
+    if last_rsi >= RSI_LIMIT or has_vol_anomaly or is_fresh_breakout:
       sr_notes = sr_detector.analyze(df)
 
       candidates.append({
@@ -679,6 +707,7 @@ def get_market_candidates():
           'chg': chg24h,
           'rsi': last_rsi,
           'res_1h': res_1h,
+          'breakout_status': breakout_status,
           'vol_anomaly': vol_div,
           'sr_notes': sr_notes,
           'df_1h': df,
@@ -733,6 +762,7 @@ def main():
     coin_text += (
         f"• 1H RSI: `{coin['rsi']:.1f}` | 1H Direnç: `{coin['res_1h']}`\n"
     )
+    coin_text += f"• Direnç Durumu: *{coin['breakout_status']}*\n"
     coin_text += f'• OI Durumu: {oi_label}\n'
     coin_text += f'• Saf Alım Baskısı: {pressure_label}\n'
     coin_text += f'• Fonlama Oranı: {funding_raw} {fl_label}\n'
@@ -742,7 +772,6 @@ def main():
       coin_text += f'• {div_label}\n'
     coin_text += f'• 15M Dönüş Teyidi: {urgent_label}\n'
 
-    # S/R ve Trend Notlarını Telegram Mesajına Ekleme
     if coin.get('sr_notes'):
       for note in coin['sr_notes']:
         coin_text += f'• {note}\n'
@@ -757,7 +786,6 @@ def main():
           'text_data': coin_text,
       })
 
-    # Sinyali CSV'ye kaydet
     log_new_signal(
         symbol, coin['current_price'], coin['rsi'], coin['res_1h']
     )
