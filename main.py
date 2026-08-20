@@ -365,7 +365,7 @@ def take_tradingview_screenshot(tv_symbol, output_path="chart.png"):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(url, wait_until="networkidle")
-            page.wait_for_timeout(5000) 
+            page.wait_for_timeout(4000) 
             page.screenshot(path=output_path)
             browser.close()
         return True
@@ -415,7 +415,7 @@ def analyze_charts_with_gemini(signals_data, btc_trend_label):
         return None
 
 # =========================================================
-# ORİJİNAL VE TAM OKX PİYASA TARAMA DÖNGÜSÜ
+# HIZLANDIRILMIŞ VE OPTİMİZE EDİLMİŞ MARKET TARAMA
 # =========================================================
 def get_market_candidates():
     print("🌐 OKX Borsasındaki aktif vadeli işlem pariteleri taranıyor...")
@@ -466,6 +466,9 @@ def get_market_candidates():
                 "sr_notes": sr_notes,
                 "df_1h": df
             })
+
+    # GitHub Actions süresini kilitlenmeden 1-2 dakikaya düşürmek için en yüksek RSI'lı MAX 3 coin seçilir
+    candidates = sorted(candidates, key=lambda x: x['rsi'], reverse=True)[:3]
     return candidates
 
 # =========================================================
