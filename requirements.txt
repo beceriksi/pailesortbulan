@@ -1,5 +1,4 @@
-requests
 pandas
-google-genai
-playwright
- 
+numpy
+ccxt
+python-telegram-bot
