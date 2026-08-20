@@ -2,13 +2,17 @@ name: Crypto SR & Trend Scanner Bot
 
 on:
   schedule:
-    # Her 1 saatte bir otomatik çalışır (CRON UTC cinsindendir)
+    # Her 1 saatte bir otomatik çalışır
     - cron: '0 * * * *'
-  workflow_dispatch: # GitHub üzerinden elle (manuel) tetikleme seçeneği
+  workflow_dispatch: # Manuel tetikleme
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
+
+    # GitHub deponuza CSV'yi geri yazabilmesi için gerekli izinler:
+    permissions:
+      contents: write
 
     steps:
       - name: Code Checkout
@@ -23,14 +27,9 @@ jobs:
       - name: Bağımlılıkların Yüklenmesi
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas numpy pillow google-genai playwright pypdf openpyxl
+          pip install requests pandas numpy pillow google-genai playwright
           playwright install chromium
-          playwright install-deps
-
-      - name: Sinyal Log Geçmişini Cache/Artifact ile Sakla
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
+          playwright install-deps chromium
 
       - name: Tarama ve Entegrasyon Botunu Çalıştır
         env:
